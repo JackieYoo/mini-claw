@@ -6,7 +6,7 @@
 
 ## 🏗️ 架构
 
-### 多 Agent 架构
+### 多 Agent 架构 (New!)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -34,6 +34,14 @@
 - **pattern**: 关键词正则匹配（最快）
 - **llm**: LLM 智能判断（最准）
 - **hybrid**: 混合策略（推荐）
+
+### 📚 多 Agent 文档
+
+| 文档 | 说明 |
+|------|------|
+| [多 Agent 完整教程](docs/multi-agent-guide.md) | 详细的使用指南 |
+| [速查表](docs/multi-agent-cheatsheet.md) | 快速参考卡片 |
+| [实战案例](docs/multi-agent-examples.md) | 各行业应用示例 |
 
 ## ✨ 功能特性
 
@@ -67,17 +75,41 @@ cd ~/projects/mini-claw
 npm install
 ```
 
-### 2. 配置
+### 2. 配置环境变量
 
 ```bash
 cp .env.example .env
-# 编辑 .env 填入配置
+# 编辑 .env 填入 MODEL_API_KEY 等配置
 ```
 
-### 3. 启动
+### 3. 配置多 Agent（可选但推荐）
 
 ```bash
+# 复制示例配置
+cp config/agents.example.yaml config/agents.yaml
+
+# 编辑配置，添加你的 Agent
+vim config/agents.yaml
+```
+
+### 4. 启动
+
+```bash
+# 启动服务
 npm start
+
+# 或使用开发模式（自动重启）
+npm run dev
+```
+
+### 5. 验证安装
+
+```bash
+# 诊断授权问题
+npm run diagnose
+
+# 测试多 Agent 功能
+npm run test:agents
 ```
 
 ## 📡 API 端点
@@ -169,30 +201,44 @@ GET /agents/:agentId
 ```
 mini-claw/
 ├── src/
-│   ├── index.js           # 入口
-│   ├── gateway/index.js   # Gateway 服务
-│   ├── agent/index.js     # Agent 核心
+│   ├── index.js              # 入口（支持多 Agent）
+│   ├── gateway/index.js      # Gateway 服务（多 Agent API）
+│   ├── agent/
+│   │   ├── index.js          # Agent 核心
+│   │   ├── factory.js        # Agent 工厂 ⭐
+│   │   └── router.js         # 智能路由 ⭐
 │   ├── channels/
-│   │   ├── index.js       # 通道管理
-│   │   └── feishu.js      # 飞书通道
+│   │   ├── index.js          # 通道管理
+│   │   └── feishu.js         # 飞书通道（@agent 支持）⭐
 │   ├── tools/
-│   │   ├── index.js       # 工具注册
-│   │   ├── shell.js       # Shell 工具
-│   │   ├── file_read.js   # 文件读取
-│   │   ├── file_write.js  # 文件写入
-│   │   ├── web_search.js  # 网络搜索
-│   │   ├── http_request.js# HTTP 请求
-│   │   └── memory.js      # 记忆管理
+│   │   ├── index.js          # 工具注册
+│   │   ├── shell.js          # Shell 工具
+│   │   ├── file_read.js      # 文件读取
+│   │   ├── file_write.js     # 文件写入
+│   │   ├── web_search.js     # 网络搜索
+│   │   ├── http_request.js   # HTTP 请求
+│   │   └── memory.js         # 记忆管理
 │   └── utils/
-│       ├── config.js      # 配置加载
-│       ├── logger.js      # 日志系统
-│       ├── session.js     # 会话管理
-│       └── skills.js      # 技能加载
-├── skills/                # 技能目录
-├── config/                # 配置文件
-├── .env.example           # 环境变量模板
+│       ├── config.js         # 配置加载（支持 agents.yaml）⭐
+│       ├── logger.js         # 日志系统
+│       ├── session.js        # 会话管理（Agent 隔离）⭐
+│       └── skills.js         # 技能加载
+├── skills/                   # 技能目录
+├── config/                   # 配置文件
+│   ├── agents.yaml           # 多 Agent 配置 ⭐
+│   └── agents.example.yaml   # 配置示例
+├── docs/                     # 文档
+│   ├── multi-agent-guide.md      # 完整教程
+│   ├── multi-agent-cheatsheet.md # 速查表
+│   └── multi-agent-examples.md   # 实战案例
+├── scripts/                  # 工具脚本
+│   ├── diagnose.js           # 授权诊断工具 ⭐
+│   └── test-multi-agent.js   # 多 Agent 测试
+├── .env.example              # 环境变量模板
 └── README.md
 ```
+
+⭐ 表示多 Agent 功能新增或修改的文件
 
 ## ⚙️ 配置说明
 
