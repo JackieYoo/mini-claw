@@ -1,15 +1,16 @@
 /**
- * Feishu Channel - Enhanced with Advanced Reaction System
+ * Feishu Channel - Multi-Agent Support Edition
  * 
- * 优化的表情回复功能：
- * - 多阶段表情反馈（收到、处理中、成功、失败）
- * - 表情队列管理（避免重复添加）
- * - 可配置的表情类型
- * - 错误处理和重试
+ * 新增功能：
+ * - @agent-name 指定 Agent
+ * - /agent 命令切换 Agent
+ * - 智能路由选择 Agent
+ * - 多 Agent 会话管理
  */
 
 import * as Lark from '@larksuiteoapi/node-sdk';
 import { createLogger } from '../utils/logger.js';
+import { extractAgentMention, parseAgentCommand } from '../agent/router.js';
 
 const logger = createLogger('feishu');
 
@@ -37,32 +38,24 @@ export function createFeishuChannel(config) {
     domain = 'feishu',
   } = config;
   
-  // 表情回复配置 - 从环境变量读取
+  // 表情回复配置
   const reactionConfig = {
     enabled: process.env.FEISHU_REACTION_ENABLED !== 'false',
-    
-    // 收到消息时的表情
     showReceived: process.env.FEISHU_REACTION_SHOW_RECEIVED !== 'false',
     receivedEmoji: process.env.FEISHU_REACTION_RECEIVED_EMOJI || 'THUMBSUP',
-    
-    // 处理中的表情
     showProcessing: process.env.FEISHU_REACTION_SHOW_PROCESSING === 'true',
     processingEmoji: process.env.FEISHU_REACTION_PROCESSING_EMOJI || 'WOW',
-    
-    // 处理结果的表情
     showResult: process.env.FEISHU_REACTION_SHOW_RESULT !== 'false',
     successEmoji: process.env.FEISHU_REACTION_SUCCESS_EMOJI || 'OK',
     errorEmoji: process.env.FEISHU_REACTION_ERROR_EMOJI || 'SORROW',
   };
   
-  
-  // 消息去重管理器 - 防止重复处理
+  // 消息去重管理器
   const messageDeduplicator = {
-    processedMessages: new Map(), // messageId -> timestamp
-    ttl: 60000, // 60秒过期
+    processedMessages: new Map(),
+    ttl: 60000,
     
     isProcessed(messageId) {
-      // 清理过期记录
       const now = Date.now();
       for (const [id, timestamp] of this.processedMessages.entries()) {
         if (now - timestamp > this.ttl) {
@@ -70,13 +63,11 @@ export function createFeishuChannel(config) {
         }
       }
       
-      // 检查是否已处理
       if (this.processedMessages.has(messageId)) {
         logger.warn(`⚠️ 消息重复，跳过: ${messageId}`);
         return true;
       }
       
-      // 标记为已处理
       this.processedMessages.set(messageId, now);
       return false;
     },
@@ -89,9 +80,12 @@ export function createFeishuChannel(config) {
     }
   };
 
+  // 会话绑定的 Agent 映射（支持多 Agent）
+  const sessionAgentBindings = new Map(); // sessionKey -> agentId
+  
   let wsClient = null;
   let eventDispatcher = null;
-  let agent = null;
+  let agentFactory = null;  // 改为 Agent 工厂
   let messageCallback = null;
   let botOpenId = null;
   let reconnectAttempts = 0;
@@ -100,7 +94,7 @@ export function createFeishuChannel(config) {
 
   // 连接健康状态管理
   const connectionState = {
-    status: 'disconnected', // 'disconnected' | 'connecting' | 'connected' | 'reconnecting'
+    status: 'disconnected',
     lastMessageAt: null,
     lastPingAt: null,
     connectedAt: null,
@@ -108,13 +102,12 @@ export function createFeishuChannel(config) {
     maxHealthCheckFailures: 3,
   };
 
-  // 健康检查定时器
   let healthCheckTimer = null;
-  const HEALTH_CHECK_INTERVAL = 30000; // 30秒检查一次
+  const HEALTH_CHECK_INTERVAL = 30000;
   
-  // 表情管理器 - 防止重复添加
+  // 表情管理器
   const reactionManager = {
-    reactions: new Map(), // messageId -> Set of emojis
+    reactions: new Map(),
     
     async add(messageId, emojiType) {
       if (!this.reactions.has(messageId)) {
@@ -123,13 +116,11 @@ export function createFeishuChannel(config) {
       
       const messageReactions = this.reactions.get(messageId);
       
-      // 如果已经添加过这个表情，跳过
       if (messageReactions.has(emojiType)) {
         logger.debug(`表情已存在，跳过: ${emojiType}`);
         return { code: 0, skipped: true };
       }
       
-      // 添加表情
       const result = await addReactionToAPI(messageId, emojiType);
       
       if (result.code === 0) {
@@ -156,7 +147,6 @@ export function createFeishuChannel(config) {
     },
   };
   
-  // 解析域名
   function resolveDomain(domainStr) {
     if (domainStr === 'lark') {
       return Lark.Domain.Lark;
@@ -164,7 +154,6 @@ export function createFeishuChannel(config) {
     return Lark.Domain.Feishu;
   }
   
-  // 获取机器人信息
   async function fetchBotInfo() {
     try {
       const client = new Lark.Client({
@@ -185,7 +174,6 @@ export function createFeishuChannel(config) {
     }
   }
   
-  // 健康检查
   function startHealthCheck() {
     if (healthCheckTimer) {
       clearInterval(healthCheckTimer);
@@ -194,20 +182,18 @@ export function createFeishuChannel(config) {
     healthCheckTimer = setInterval(() => {
       const now = Date.now();
 
-      // 如果已连接但超过60秒没有收到消息，检查连接状态
       if (connectionState.status === 'connected' && connectionState.lastMessageAt) {
         const timeSinceLastMessage = now - connectionState.lastMessageAt;
 
         if (timeSinceLastMessage > 60000) {
           connectionState.healthCheckFailures++;
-          logger.warn(`健康检查失败: ${connectionState.healthCheckFailures}/${connectionState.maxHealthCheckFailures} 次未收到消息，已 ${Math.floor(timeSinceLastMessage / 1000)} 秒`);
+          logger.warn(`健康检查失败: ${connectionState.healthCheckFailures}/${connectionState.maxHealthCheckFailures} 次未收到消息`);
 
           if (connectionState.healthCheckFailures >= connectionState.maxHealthCheckFailures) {
             logger.error('健康检查失败次数过多，触发重连...');
-            reconnect(agent);
+            reconnect(agentFactory);
           }
         } else {
-          // 重置失败计数
           connectionState.healthCheckFailures = 0;
         }
       }
@@ -216,13 +202,11 @@ export function createFeishuChannel(config) {
     logger.debug('健康检查已启动');
   }
 
-  // 更新消息接收时间
   function updateLastMessageTime() {
     connectionState.lastMessageAt = Date.now();
     connectionState.healthCheckFailures = 0;
   }
 
-  // 停止健康检查
   function stopHealthCheck() {
     if (healthCheckTimer) {
       clearInterval(healthCheckTimer);
@@ -232,9 +216,9 @@ export function createFeishuChannel(config) {
     connectionState.healthCheckFailures = 0;
   }
 
-  // 连接飞书长连接
-  async function connect(agentInstance) {
-    agent = agentInstance;
+  // 连接飞书长连接（接收 agentFactory 替代单个 agent）
+  async function connect(factory) {
+    agentFactory = factory;
 
     if (!app_id || !app_secret) {
       throw new Error('飞书 App ID 或 App Secret 未配置');
@@ -268,7 +252,13 @@ export function createFeishuChannel(config) {
         
         'im.chat.member.bot.added_v1': async (data) => {
           logger.info(`机器人被添加到群聊: ${data.chat_id}`);
-          await sendMessage(data.chat_id, 'chat_id', '🦞 你好！我是 MiniClaw 助手，有什么可以帮助你的吗？');
+          const agents = agentFactory?.getAllInfo?.() || [];
+          let welcomeMsg = '🦞 你好！我是 MiniClaw 多 Agent 助手\n\n可用 Agent：\n';
+          for (const agent of agents) {
+            welcomeMsg += `• @${agent.id} - ${agent.name}\n`;
+          }
+          welcomeMsg += '\n使用 @agent-name 指定 Agent，或 /agents 查看全部';
+          await sendMessage(data.chat_id, 'chat_id', welcomeMsg);
         },
         
         'im.chat.member.bot.deleted_v1': async (data) => {
@@ -289,32 +279,28 @@ export function createFeishuChannel(config) {
       wsClient.start({ eventDispatcher });
       reconnectAttempts = 0;
 
-      // 更新连接状态
       connectionState.status = 'connected';
       connectionState.connectedAt = Date.now();
       connectionState.lastMessageAt = Date.now();
       connectionState.healthCheckFailures = 0;
 
-      // 启动健康检查
       startHealthCheck();
 
       logger.info('✅ 飞书长连接已建立');
       
     } catch (err) {
       logger.error('连接飞书长连接失败:', err);
-      await reconnect(agentInstance);
+      await reconnect(factory);
       throw err;
     }
   }
   
-  // 处理消息事件
+  // 处理消息事件（多 Agent 支持）
   async function handleMessageEvent(event) {
     const { sender, message } = event;
     
-    // 提前获取 messageId 用于去重
     const messageId = message.message_id;
     
-    // 消息去重检查
     if (messageDeduplicator.isProcessed(messageId)) {
       return;
     }
@@ -348,6 +334,7 @@ export function createFeishuChannel(config) {
     const senderName = sender.sender_id?.name || senderId;
     const chatId = message.chat_id;
     const chatType = message.chat_type;
+    
     logger.info(`收到消息 [${chatType}] ${senderName}: ${content.substring(0, 50)}...`);
     
     // 群聊检查是否 @ 机器人
@@ -373,19 +360,56 @@ export function createFeishuChannel(config) {
       await reactionManager.add(messageId, reactionConfig.receivedEmoji);
     }
     
+    // 生成会话 Key
+    const sessionKey = agentFactory?.getDefault?.()?.sessionManager?.generateSessionKey?.({
+      channel: 'feishu',
+      chatType,
+      chatId,
+      senderId,
+    }) || `feishu:${chatType === 'group' ? 'group' : 'dm'}:${chatId}`;
+    
     // 处理命令
     if (content.startsWith('/')) {
-      await handleCommand(content, chatId, chatType, messageId);
+      await handleCommand(content, chatId, chatType, messageId, sessionKey);
       return;
     }
     
-    // 调用 Agent 处理
-    if (agent && content) {
+    // 解析 @agent 提及和 /agent 命令
+    const { text: cleanedContent, agentId: mentionedAgentId } = extractAgentMention(content);
+    
+    // 检查是否有会话绑定的 Agent
+    let boundAgentId = sessionAgentBindings.get(sessionKey);
+    
+    // 优先使用提及的 Agent，其次是绑定的 Agent
+    const targetAgentId = mentionedAgentId || boundAgentId;
+    
+    if (cleanedContent && agentFactory) {
       try {
-        // 添加"处理中"表情
         if (reactionConfig.enabled && reactionConfig.showProcessing) {
           await reactionManager.add(messageId, reactionConfig.processingEmoji);
         }
+        
+        // 智能路由选择 Agent
+        const agent = await agentFactory.select(cleanedContent, {
+          sessionKey,
+          agentId: targetAgentId,
+          channel: 'feishu',
+          chatType,
+          chatId,
+          senderId,
+        });
+        
+        if (!agent) {
+          throw new Error('没有可用的 Agent');
+        }
+        
+        // 如果不是通过 @ 临时指定的，绑定会话到选中的 Agent
+        if (!mentionedAgentId && agent.metadata.id !== boundAgentId) {
+          sessionAgentBindings.set(sessionKey, agent.metadata.id);
+          logger.debug(`会话 ${sessionKey} 绑定到 Agent ${agent.metadata.id}`);
+        }
+        
+        logger.info(`使用 Agent: ${agent.metadata.name} (${agent.metadata.id})`);
         
         const agentContext = {
           channel: 'feishu',
@@ -396,15 +420,20 @@ export function createFeishuChannel(config) {
           messageId,
         };
         
-        logger.debug(`调用 Agent...`);
-        const response = await agent.chat(content, agentContext);
+        const response = await agent.chat(cleanedContent, agentContext);
         
         const replyContent = response.content;
         logger.info(`Agent 回复: ${replyContent?.substring(0, 100)}...`);
         
-        await sendMessage(chatId, 'chat_id', replyContent, 'text', messageId);
+        // 添加 Agent 标识（如果是多 Agent 模式）
+        const allAgents = agentFactory.getAllInfo?.() || [];
+        let finalReply = replyContent;
+        if (allAgents.length > 1 && agent.metadata.id !== 'default') {
+          finalReply = `[${agent.metadata.name}]\n${replyContent}`;
+        }
         
-        // 添加"成功"表情
+        await sendMessage(chatId, 'chat_id', finalReply, 'text', messageId);
+        
         if (reactionConfig.enabled && reactionConfig.showResult) {
           await reactionManager.add(messageId, reactionConfig.successEmoji);
         }
@@ -413,7 +442,6 @@ export function createFeishuChannel(config) {
         logger.error('Agent 处理错误:', err.message);
         await sendMessage(chatId, 'chat_id', `❌ ${err.message}`);
         
-        // 添加"失败"表情
         if (reactionConfig.enabled && reactionConfig.showResult) {
           await reactionManager.add(messageId, reactionConfig.errorEmoji);
         }
@@ -422,7 +450,7 @@ export function createFeishuChannel(config) {
     
     if (messageCallback) {
       await messageCallback({
-        content,
+        content: cleanedContent,
         senderId,
         chatId,
         chatType,
@@ -431,44 +459,115 @@ export function createFeishuChannel(config) {
     }
   }
   
-  // 处理命令
-  async function handleCommand(content, chatId, chatType, messageId) {
-    const cmd = content.trim().toLowerCase();
+  // 处理命令（多 Agent 支持）
+  async function handleCommand(content, chatId, chatType, messageId, sessionKey) {
+    const cmdParts = content.trim().split(/\s+/);
+    const cmd = cmdParts[0].toLowerCase();
+    const args = cmdParts.slice(1);
     
     switch (cmd) {
-      case '/status':
-        await sendMessage(chatId, 'chat_id', 
-          '🦞 MiniClaw 运行中\n' +
-          `会话数: ${agent?.getSessionStats?.()?.totalSessions || 0}`
-        );
-        break;
+      case '/status': {
+        let statusMsg = '🦞 MiniClaw 运行中\n\n';
         
-      case '/reset':
-        if (agent) {
-          const sessionKey = `feishu:${chatType === 'group' ? 'group' : 'dm'}:${chatId}`;
-          agent.resetSession(sessionKey);
+        const factoryStats = agentFactory?.getStats?.();
+        if (factoryStats) {
+          statusMsg += `Agent 数量: ${factoryStats.total}\n`;
+          statusMsg += `当前会话: ${factoryStats.sessionBindings || 0}\n\n`;
+          
+          for (const agentStat of factoryStats.agents || []) {
+            const stats = agentStat.stats || {};
+            statusMsg += `• ${agentStat.name}: ${stats.totalCalls || 0} 次调用\n`;
+          }
+        }
+        
+        await sendMessage(chatId, 'chat_id', statusMsg);
+        break;
+      }
+      
+      case '/reset': {
+        if (sessionKey && agentFactory) {
+          // 重置该会话在所有 Agent 中的状态
+          for (const agent of agentFactory.getAll?.() || []) {
+            agent.resetSession?.(sessionKey);
+          }
+          // 清除 Agent 绑定
+          sessionAgentBindings.delete(sessionKey);
           await sendMessage(chatId, 'chat_id', '✅ 会话已重置');
         }
         break;
-        
-      case '/help':
-        await sendMessage(chatId, 'chat_id',
-          '🦞 MiniClaw 命令:\n' +
-          '/status - 查看状态\n' +
-          '/reset - 重置会话\n' +
-          '/help - 显示帮助'
-        );
+      }
+      
+      case '/help': {
+        let helpMsg = '🦞 MiniClaw 命令:\n\n';
+        helpMsg += '/status - 查看状态\n';
+        helpMsg += '/reset - 重置会话\n';
+        helpMsg += '/agents - 查看可用 Agent\n';
+        helpMsg += '/agent <name> - 切换到指定 Agent\n';
+        helpMsg += '@<agent-name> <消息> - 临时使用某个 Agent\n';
+        helpMsg += '/help - 显示帮助';
+        await sendMessage(chatId, 'chat_id', helpMsg);
         break;
+      }
+      
+      case '/agents': {
+        const agents = agentFactory?.getAllInfo?.() || [];
+        let agentsMsg = '🤖 可用 Agent 列表:\n\n';
+        const currentAgentId = sessionAgentBindings.get(sessionKey);
         
-      default:
-        if (agent && content.length > 1) {
-          const response = await agent.chat(content);
-          await sendMessage(chatId, 'chat_id', response.content);
+        for (const agent of agents) {
+          const marker = agent.id === currentAgentId ? '▶ ' : '  ';
+          agentsMsg += `${marker}@${agent.id} - ${agent.name}\n`;
+          if (agent.description) {
+            agentsMsg += `     ${agent.description}\n`;
+          }
         }
+        
+        agentsMsg += '\n使用 @agent-name 或 /agent <name> 切换';
+        await sendMessage(chatId, 'chat_id', agentsMsg);
+        break;
+      }
+      
+      case '/agent': {
+        if (args.length === 0) {
+          const currentAgentId = sessionAgentBindings.get(sessionKey);
+          if (currentAgentId) {
+            const agent = agentFactory?.get?.(currentAgentId);
+            await sendMessage(chatId, 'chat_id', `当前 Agent: ${agent?.metadata?.name || currentAgentId}`);
+          } else {
+            await sendMessage(chatId, 'chat_id', '未指定 Agent，使用默认路由');
+          }
+          return;
+        }
+        
+        const targetAgentId = args[0].replace(/^@/, '');
+        const agent = agentFactory?.get?.(targetAgentId);
+        
+        if (!agent) {
+          await sendMessage(chatId, 'chat_id', `❌ Agent "${targetAgentId}" 不存在，使用 /agents 查看列表`);
+          return;
+        }
+        
+        // 绑定会话到指定 Agent
+        sessionAgentBindings.set(sessionKey, targetAgentId);
+        await sendMessage(chatId, 'chat_id', `✅ 已切换到 ${agent.metadata.name}\n后续消息将优先由此 Agent 处理`);
+        break;
+      }
+      
+      default: {
+        // 未知命令也交给 Agent 处理
+        if (agentFactory && content.length > 1) {
+          try {
+            const agent = await agentFactory.select(content, { sessionKey });
+            const response = await agent.chat(content);
+            await sendMessage(chatId, 'chat_id', response.content);
+          } catch (err) {
+            await sendMessage(chatId, 'chat_id', `❌ ${err.message}`);
+          }
+        }
+      }
     }
   }
   
-  // 从富文本提取纯文本
   function extractTextFromPost(postContent) {
     if (!postContent) return '';
     
@@ -493,7 +592,6 @@ export function createFeishuChannel(config) {
     return text;
   }
   
-  // 发送消息
   async function sendMessage(receiveId, receiveIdType, content, msgType = 'text', replyToMessageId = null) {
     if (!content) return;
     
@@ -512,14 +610,18 @@ export function createFeishuChannel(config) {
       };
       
       const result = await client.im.message.create({
-        params: {
-          receive_id_type: receiveIdType,
-        },
+        params: { receive_id_type: receiveIdType },
         data: messageData,
       });
       
       if (result.code !== 0) {
         logger.error('发送消息失败:', result);
+        if (result.code === 40001) {
+          logger.error('授权失败，请检查:');
+          logger.error('  1. App ID 和 App Secret 是否正确');
+          logger.error('  2. 应用是否已发布到企业');
+          logger.error('  3. 应用权限是否足够');
+        }
       } else {
         logger.debug('消息发送成功');
       }
@@ -532,7 +634,6 @@ export function createFeishuChannel(config) {
     }
   }
   
-  // 添加表情回复 - API 调用
   async function addReactionToAPI(messageId, emojiType = 'THUMBSUP') {
     try {
       const client = new Lark.Client({
@@ -543,17 +644,9 @@ export function createFeishuChannel(config) {
       });
       
       const result = await client.im.messageReaction.create({
-        path: {
-          message_id: messageId,
-        },
-        params: {
-          user_id_type: 'open_id',
-        },
-        data: {
-          reaction_type: {
-            emoji_type: emojiType
-          }
-        }
+        path: { message_id: messageId },
+        params: { user_id_type: 'open_id' },
+        data: { reaction_type: { emoji_type: emojiType } }
       });
       
       if (result.code === 0) {
@@ -571,7 +664,6 @@ export function createFeishuChannel(config) {
     }
   }
   
-  // 移除表情回复 - API 调用
   async function removeReactionFromAPI(messageId, emojiType = 'THUMBSUP') {
     try {
       const client = new Lark.Client({
@@ -582,17 +674,9 @@ export function createFeishuChannel(config) {
       });
       
       const result = await client.im.messageReaction.delete({
-        path: {
-          message_id: messageId,
-        },
-        params: {
-          user_id_type: 'open_id',
-        },
-        data: {
-          reaction_type: {
-            emoji_type: emojiType
-          }
-        }
+        path: { message_id: messageId },
+        params: { user_id_type: 'open_id' },
+        data: { reaction_type: { emoji_type: emojiType } }
       });
       
       if (result.code === 0) {
@@ -607,7 +691,6 @@ export function createFeishuChannel(config) {
     }
   }
   
-  // 公开的表情管理方法
   async function addReaction(messageId, emojiType = 'THUMBSUP') {
     return reactionManager.add(messageId, emojiType);
   }
@@ -626,12 +709,8 @@ export function createFeishuChannel(config) {
       });
       
       const result = await client.im.messageReaction.list({
-        path: {
-          message_id: messageId,
-        },
-        params: {
-          user_id_type: 'open_id',
-        },
+        path: { message_id: messageId },
+        params: { user_id_type: 'open_id' },
       });
       
       if (result.code === 0) {
@@ -650,8 +729,7 @@ export function createFeishuChannel(config) {
     messageCallback = callback;
   }
   
-  // 重新连接
-  async function reconnect(agentInstance) {
+  async function reconnect(factory) {
     connectionState.status = 'reconnecting';
     stopHealthCheck();
 
@@ -661,7 +739,7 @@ export function createFeishuChannel(config) {
       logger.info(`将在 ${delay}ms 后尝试重连 (第 ${reconnectAttempts} 次)...`);
 
       setTimeout(() => {
-        connect(agentInstance).catch(err => {
+        connect(factory).catch(err => {
           logger.error('重连失败:', err);
         });
       }, delay);

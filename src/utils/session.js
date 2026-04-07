@@ -138,22 +138,53 @@ export function createSessionManager(options = {}) {
   
   /**
    * 生成会话 Key
-   * OpenClaw 格式: agent:<agentId>:<channel>:<type>:<id>
+   * 多 Agent 格式: <agentId>:<channel>:<type>:<id>
+   * 旧格式兼容: <channel>:<type>:<id>
    */
-  function generateSessionKey({ channel, chatType, chatId, senderId }) {
+  function generateSessionKey({ agentId, channel, chatType, chatId, senderId }) {
+    // 构建基础 key（不含 agentId）
+    let baseKey;
+    
     if (chatType === 'group' || chatType === 'channel') {
-      return `${channel}:group:${chatId}`;
+      baseKey = `${channel}:group:${chatId}`;
+    } else {
+      switch (dmScope) {
+        case 'main':
+          baseKey = 'main';
+          break;
+        case 'per-peer':
+          baseKey = `${channel}:dm:${senderId}`;
+          break;
+        case 'per-channel-peer':
+        default:
+          baseKey = `${channel}:dm:${chatId}`;
+          break;
+      }
     }
     
-    switch (dmScope) {
-      case 'main':
-        return 'main';
-      case 'per-peer':
-        return `${channel}:dm:${senderId}`;
-      case 'per-channel-peer':
-      default:
-        return `${channel}:dm:${chatId}`;
+    // 添加 agentId 前缀实现隔离
+    // 如果未指定 agentId，使用 'default' 作为默认
+    const prefix = agentId || 'default';
+    return `${prefix}:${baseKey}`;
+  }
+  
+  /**
+   * 解析会话 Key，提取 agentId 和基础 key
+   */
+  function parseSessionKey(sessionKey) {
+    if (!sessionKey) return { agentId: 'default', baseKey: '', fullKey: '' };
+    
+    const parts = sessionKey.split(':');
+    
+    // 新格式: agentId:channel:type:id (4+ 部分)
+    if (parts.length >= 4) {
+      const agentId = parts[0];
+      const baseKey = parts.slice(1).join(':');
+      return { agentId, baseKey, fullKey: sessionKey };
     }
+    
+    // 旧格式兼容: 无前缀，直接返回
+    return { agentId: 'default', baseKey: sessionKey, fullKey: sessionKey };
   }
   
   /**
@@ -362,8 +393,75 @@ export function createSessionManager(options = {}) {
     }
   }
   
+  /**
+   * 按 Agent 获取会话统计
+   */
+  function getStatsByAgent() {
+    const stats = {};
+    
+    for (const [key, session] of sessions) {
+      const { agentId } = parseSessionKey(key);
+      if (!stats[agentId]) {
+        stats[agentId] = {
+          sessionCount: 0,
+          messageCount: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+        };
+      }
+      stats[agentId].sessionCount++;
+      stats[agentId].messageCount += session.messages?.length || 0;
+      stats[agentId].inputTokens += session.tokenCount?.input || 0;
+      stats[agentId].outputTokens += session.tokenCount?.output || 0;
+    }
+    
+    return stats;
+  }
+  
+  /**
+   * 获取指定 Agent 的会话列表
+   */
+  function listSessionsByAgent(agentId, limit = 20) {
+    return Array.from(sessions.entries())
+      .filter(([key]) => {
+        const parsed = parseSessionKey(key);
+        return parsed.agentId === agentId;
+      })
+      .sort((a, b) => b[1].updatedAt - a[1].updatedAt)
+      .slice(0, limit)
+      .map(([key, session]) => ({
+        key,
+        baseKey: parseSessionKey(key).baseKey,
+        id: session.id,
+        messageCount: session.messageCount,
+        tokenCount: session.tokenCount,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+      }));
+  }
+  
+  /**
+   * 删除指定 Agent 的所有会话
+   */
+  function deleteSessionsByAgent(agentId) {
+    let deleted = 0;
+    for (const [key] of sessions) {
+      const { agentId: keyAgentId } = parseSessionKey(key);
+      if (keyAgentId === agentId) {
+        sessions.delete(key);
+        deleted++;
+      }
+    }
+    if (deleted > 0) {
+      logger.info(`已删除 Agent ${agentId} 的 ${deleted} 个会话`);
+      triggerSave(true);
+    }
+    return deleted;
+  }
+  
   return {
     generateSessionKey,
+    parseSessionKey,
     getSession,
     addMessage,
     updateTokenCount,
@@ -371,6 +469,9 @@ export function createSessionManager(options = {}) {
     deleteSession,
     listSessions,
     getStats,
+    getStatsByAgent,
+    listSessionsByAgent,
+    deleteSessionsByAgent,
     saveToDisk,
     close,
   };

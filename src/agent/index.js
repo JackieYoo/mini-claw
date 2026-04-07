@@ -413,5 +413,13 @@ export function createAgent(config, toolRegistry) {
     getStats,
     sessionManager,
     client,
+    // 暴露配置供外部使用
+    config: {
+      model: config.model,
+      base_url: config.base_url,
+      api_key: config.api_key ? '***' : undefined, // 脱敏
+      temperature: config.temperature,
+      max_tokens: config.max_tokens,
+    },
   };
 }

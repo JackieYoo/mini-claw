@@ -2,29 +2,38 @@
 
 一个精简版的 AI 助手框架，学习 OpenClaw 的核心架构设计。
 
+**🎉 新功能：支持多 Agent 智能路由！**
+
 ## 🏗️ 架构
 
+### 多 Agent 架构
+
 ```
-┌─────────────────────────────────────────────────────┐
-│                 Gateway (控制中心)                    │
-│           WebSocket Server + HTTP API               │
-│    /health /stats /sessions /tools /skills /chat   │
-└──────────────────────┬──────────────────────────────┘
-                       │
-         ┌─────────────┼─────────────┐
-         ▼             ▼             ▼
-   ┌──────────┐  ┌──────────┐  ┌──────────┐
-   │ Channels │  │  Agent   │  │  Tools   │
-   │ 飞书/WS  │  │ 会话管理 │  │ 6个工具  │
-   └──────────┘  └──────────┘  └──────────┘
-         │             │             │
-         └─────────────┼─────────────┘
-                       ▼
-              ┌──────────────┐
-              │   Skills     │
-              │ AgentSkills  │
-              └──────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                        Gateway                               │
+│                   (路由 + 负载均衡)                           │
+└──────────────┬──────────────────────────────────────────────┘
+               │
+    ┌──────────┼──────────┬──────────┐
+    ▼          ▼          ▼          ▼
+┌───────┐  ┌───────┐  ┌───────┐  ┌───────┐
+│Agent-1│  │Agent-2│  │Agent-3│  │Agent-N│  │← Agent Registry
+│通用助手│  │代码助手│  │文档助手│  │自定义 │
+└───────┘  └───────┘  └───────┘  └───────┘
+    │          │          │           │
+    └──────────┴──────────┴───────────┘
+                   │
+            ┌──────────────┐
+            │ Session Store│  │← 按 agentId 隔离会话
+            │ (agent+user) │
+            └──────────────┘
 ```
+
+### 路由策略
+
+- **pattern**: 关键词正则匹配（最快）
+- **llm**: LLM 智能判断（最准）
+- **hybrid**: 混合策略（推荐）
 
 ## ✨ 功能特性
 
@@ -85,13 +94,75 @@ npm start
 | `/sessions/:key` | DELETE | 重置会话 |
 | `/ws` | WS | WebSocket 连接 |
 
-## 🎮 飞书命令
+## 🤖 多 Agent 使用指南
 
-| 命令 | 说明 |
-|------|------|
-| `/status` | 查看运行状态 |
-| `/reset` | 重置当前会话 |
-| `/help` | 显示帮助信息 |
+### 配置文件 (`config/agents.yaml`)
+
+```yaml
+# 路由策略: pattern | llm | hybrid
+router:
+  strategy: hybrid
+  default_agent: default
+
+# Agent 定义
+agents:
+  default:
+    name: 通用助手
+    description: 处理日常对话
+    model: ${MODEL_NAME}
+    system_prompt: "你是通用助手..."
+    tools: [shell, file_read, web_search]
+    route:
+      priority: 0
+      patterns: []
+
+  code:
+    name: 代码助手
+    description: 处理编程问题
+    model: gpt-4
+    temperature: 0.3
+    system_prompt: "你是代码专家..."
+    tools: [shell, file_read, file_write]
+    route:
+      priority: 10
+      patterns:
+        - "写代码"
+        - "编程"
+        - "\\.js$"
+        - "\\.py$"
+```
+
+### 飞书多 Agent 命令
+
+| 命令 | 说明 | 示例 |
+|------|------|------|
+| `@agent-name` | 临时使用某 Agent | `@code 帮我写个函数` |
+| `/agent <name>` | 切换当前 Agent | `/agent code` |
+| `/agents` | 查看所有 Agent | - |
+| `/reset` | 重置会话并解绑 Agent | - |
+
+### API 多 Agent 支持
+
+```bash
+# 显式指定 Agent
+POST /chat
+{
+  "message": "帮我写个函数",
+  "agent": "code"
+}
+
+# 让系统自动路由
+POST /chat
+{
+  "message": "帮我写个函数"
+}
+
+# 获取所有 Agent
+GET /agents
+
+# 获取指定 Agent 信息
+GET /agents/:agentId
+```
 
 ## 📁 项目结构
 

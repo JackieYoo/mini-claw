@@ -1,6 +1,6 @@
 /**
  * Gateway - WebSocket + HTTP Server
- * 学习 OpenClaw 的 Gateway 设计
+ * 支持多 Agent 架构
  */
 
 import Fastify from 'fastify';
@@ -8,11 +8,12 @@ import websocket from '@fastify/websocket';
 import cors from '@fastify/cors';
 import { createLogger } from '../utils/logger.js';
 import { createAuth } from '../utils/auth.js';
+import { extractAgentMention, parseAgentCommand } from '../agent/router.js';
 
 const logger = createLogger('gateway');
 
 export function createGateway(config, deps) {
-  const { agent, channelManager, toolRegistry, skillsLoader } = deps;
+  const { agentFactory, channelManager, toolRegistry, skillsLoader } = deps;
 
   const fastify = Fastify({ logger: false });
   fastify.register(websocket);
@@ -40,7 +41,6 @@ export function createGateway(config, deps) {
 
     // 处理不同类型的错误
     if (error.validation) {
-      // 参数验证错误
       return reply.status(400).send({
         error: 'Validation Error',
         message: '请求参数不符合要求',
@@ -49,14 +49,12 @@ export function createGateway(config, deps) {
     }
 
     if (error.statusCode) {
-      // 已知的 HTTP 错误
       return reply.status(error.statusCode).send({
         error: error.name || 'Error',
         message: error.message,
       });
     }
 
-    // 未知错误 - 返回通用错误信息，避免泄露内部细节
     return reply.status(500).send({
       error: 'Internal Server Error',
       message: '服务器内部错误，请稍后重试',
@@ -64,19 +62,16 @@ export function createGateway(config, deps) {
     });
   });
 
-  // 未捕获的 promise 拒绝处理
   fastify.addHook('onRequest', async (request, reply) => {
     request.startTime = Date.now();
   });
 
-  // 请求日志和性能监控
   fastify.addHook('onResponse', async (request, reply) => {
     const duration = Date.now() - request.startTime;
     if (duration > 1000) {
       logger.warn(`慢请求 [${request.method} ${request.url}]: ${duration}ms`);
     }
 
-    // 记录认证信息
     if (request.auth) {
       logger.debug(`认证用户: ${request.auth.type} - ${request.auth.apiKey || request.auth.userId}`);
     }
@@ -138,40 +133,132 @@ export function createGateway(config, deps) {
       status: 'ok',
       uptime: Math.floor((Date.now() - stats.startTime) / 1000),
       timestamp: new Date().toISOString(),
+      agents: agentFactory?.getStats()?.total || 0,
     };
   });
   
   // ==================== 状态统计 ====================
   fastify.get('/stats', async () => {
-    const sessionStats = agent?.getSessionStats?.() || {};
+    const agentStats = agentFactory?.getStats() || {};
+    const sessionStats = {};
+    
+    // 收集各 Agent 的会话统计
+    for (const agent of agentFactory?.getAll() || []) {
+      sessionStats[agent.metadata.id] = agent.sessionManager?.getStats?.() || {};
+    }
     
     return {
       uptime: Math.floor((Date.now() - stats.startTime) / 1000),
       requests: stats.totalRequests,
       messages: stats.totalMessages,
       errors: stats.totalErrors,
+      wsClients: wsClients.size,
+      agents: agentStats,
       sessions: sessionStats,
       tools: toolRegistry?.getTools?.()?.length || 0,
       skills: skillsLoader?.getAll?.()?.length || 0,
-      wsClients: wsClients.size,
     };
+  });
+  
+  // ==================== Agent 管理 API ====================
+  
+  // 获取所有 Agent 列表
+  fastify.get('/agents', async () => {
+    return {
+      agents: agentFactory?.getAllInfo() || [],
+      default: agentFactory?.getDefault?.()?.metadata?.id,
+    };
+  });
+  
+  // 获取指定 Agent 信息
+  fastify.get('/agents/:agentId', async (request, reply) => {
+    const { agentId } = request.params;
+    const agent = agentFactory?.get(agentId);
+    
+    if (!agent) {
+      return reply.status(404).send({ error: 'Agent not found' });
+    }
+    
+    return {
+      id: agent.metadata.id,
+      name: agent.metadata.name,
+      description: agent.metadata.description,
+      model: agent.metadata.model,
+      tools: agent.metadata.allowedTools,
+      skills: agent.metadata.skills,
+      stats: agent.getStats?.() || {},
+    };
+  });
+  
+  // 获取指定 Agent 的会话列表
+  fastify.get('/agents/:agentId/sessions', async (request, reply) => {
+    const { agentId } = request.params;
+    const limit = parseInt(request.query.limit) || 20;
+    const agent = agentFactory?.get(agentId);
+    
+    if (!agent) {
+      return reply.status(404).send({ error: 'Agent not found' });
+    }
+    
+    const sessions = agent.sessionManager?.listSessionsByAgent?.(agentId, limit) || [];
+    return { agentId, sessions };
   });
   
   // ==================== 会话管理 ====================
   fastify.get('/sessions', async (request, reply) => {
     const limit = parseInt(request.query.limit) || 20;
-    const sessions = agent?.sessionManager?.listSessions?.(limit) || [];
-    return { sessions };
+    const agentId = request.query.agent;
+    
+    if (agentId) {
+      const agent = agentFactory?.get(agentId);
+      if (!agent) {
+        return reply.status(404).send({ error: 'Agent not found' });
+      }
+      const sessions = agent.sessionManager?.listSessionsByAgent?.(agentId, limit) || [];
+      return { agentId, sessions };
+    }
+    
+    // 返回所有会话（按 Agent 分组）
+    const allSessions = {};
+    for (const agent of agentFactory?.getAll() || []) {
+      allSessions[agent.metadata.id] = agent.sessionManager?.listSessions?.(limit) || [];
+    }
+    return { sessions: allSessions };
+  });
+  
+  // 重置指定会话
+  fastify.delete('/sessions/:sessionKey', async (request, reply) => {
+    const { sessionKey } = request.params;
+    const { agentId } = request.query;
+    
+    if (agentId) {
+      const agent = agentFactory?.get(agentId);
+      if (agent) {
+        agent.resetSession?.(sessionKey);
+        return { success: true, message: `Agent ${agentId} 的会话已重置` };
+      }
+    }
+    
+    // 尝试在所有 Agent 中重置
+    let resetCount = 0;
+    for (const agent of agentFactory?.getAll() || []) {
+      try {
+        agent.resetSession?.(sessionKey);
+        resetCount++;
+      } catch (e) {
+        // 忽略错误
+      }
+    }
+    
+    return { success: true, message: `${resetCount} 个 Agent 的会话已重置` };
   });
   
   // ==================== WebSocket 端点 ====================
   fastify.register(async function (fastify) {
     fastify.get('/ws', { websocket: true }, (connection, req) => {
-      // 简单的 token 认证（通过 query 参数）
       const token = req.query.token;
       const validToken = process.env.WS_AUTH_TOKEN;
       
-      // 如果配置了认证 token，则验证
       if (validToken && token !== validToken) {
         logger.warn(`WebSocket 认证失败: 无效的 token`);
         connection.socket.send(JSON.stringify({
@@ -189,12 +276,12 @@ export function createGateway(config, deps) {
         connection,
         connectedAt: Date.now(),
         messages: 0,
+        currentAgent: null,
       });
       
-      // 发送欢迎消息
       connection.socket.send(JSON.stringify({
         type: 'connected',
-        payload: { clientId }
+        payload: { clientId, agents: agentFactory?.getAllInfo()?.map(a => ({ id: a.id, name: a.name })) }
       }));
       
       connection.socket.on('message', async (data) => {
@@ -205,7 +292,7 @@ export function createGateway(config, deps) {
           const client = wsClients.get(clientId);
           if (client) client.messages++;
           
-          const response = await handleWsMessage(msg, clientId);
+          const response = await handleWsMessage(msg, clientId, client);
           connection.socket.send(JSON.stringify(response));
         } catch (err) {
           stats.totalErrors++;
@@ -226,13 +313,13 @@ export function createGateway(config, deps) {
   
   // ==================== HTTP API ====================
   
-  // 聊天接口
+  // 聊天接口 - 支持多 Agent
   fastify.post('/chat', async (request, reply) => {
     stats.totalRequests++;
     
     // Rate limiting
     const clientIp = request.ip || 'unknown';
-    const rateCheck = checkRateLimit(`ip:${clientIp}`, 30, 60000); // 30次/分钟
+    const rateCheck = checkRateLimit(`ip:${clientIp}`, 30, 60000);
     
     if (!rateCheck.allowed) {
       stats.rateLimitedRequests++;
@@ -242,10 +329,10 @@ export function createGateway(config, deps) {
       });
     }
     
-    const { message, sessionKey, context } = request.body;
+    const { message, sessionKey, context, agent: requestedAgentId } = request.body;
     
     // 输入大小限制
-    const maxMessageSize = 100000; // 100KB
+    const maxMessageSize = 100000;
     if (message && message.length > maxMessageSize) {
       return reply.status(400).send({ error: 'Message too large' });
     }
@@ -255,17 +342,41 @@ export function createGateway(config, deps) {
     }
     
     try {
-      const response = await agent.chat(message, sessionKey || context);
+      // 智能路由选择 Agent
+      const agent = await agentFactory.select(message, {
+        sessionKey,
+        agentId: requestedAgentId,
+        ...context,
+      });
+      
+      if (!agent) {
+        return reply.status(404).send({ error: 'No available agent' });
+      }
+      
+      // 生成带 agentId 的会话 key
+      const agentSessionKey = agent.sessionManager?.generateSessionKey?.({
+        agentId: agent.metadata.id,
+        ...(context || {}),
+      }) || sessionKey;
+      
+      const finalSessionKey = sessionKey || agentSessionKey;
+      
+      const response = await agent.chat(message, finalSessionKey);
+      
       return {
         success: true,
         response: response.content,
+        agentId: agent.metadata.id,
+        agentName: agent.metadata.name,
         sessionId: response.sessionId,
         sessionKey: response.sessionKey,
+        tokens: response.tokens,
+        toolCalls: response.toolCalls,
+        duration: response.duration,
       };
     } catch (err) {
       stats.totalErrors++;
       logger.error('Chat 错误:', err.message);
-      // 让全局错误处理器处理
       throw err;
     }
   });
@@ -283,7 +394,6 @@ export function createGateway(config, deps) {
     } catch (err) {
       stats.totalErrors++;
       logger.error(`工具执行错误 [${toolName}]:`, err.message);
-      // 让全局错误处理器处理
       throw err;
     }
   });
@@ -310,13 +420,6 @@ export function createGateway(config, deps) {
     };
   });
   
-  // 重置会话
-  fastify.delete('/sessions/:sessionKey', async (request, reply) => {
-    const { sessionKey } = request.params;
-    agent?.resetSession?.(sessionKey);
-    return { success: true, message: 'Session reset' };
-  });
-  
   // ==================== Webhook（用于其他渠道） ====================
   fastify.post('/webhook/:channel', async (request, reply) => {
     const { channel } = request.params;
@@ -331,31 +434,89 @@ export function createGateway(config, deps) {
       return result;
     } catch (err) {
       logger.error(`Webhook 错误 (${channel}):`, err);
-      // 让全局错误处理器处理
       throw err;
     }
   });
   
   // ==================== WebSocket 消息处理 ====================
-  async function handleWsMessage(msg, clientId) {
+  async function handleWsMessage(msg, clientId, client) {
     const { type, payload } = msg;
 
     try {
       switch (type) {
-        case 'chat':
+        case 'chat': {
           stats.totalRequests++;
-          const response = await agent.chat(payload.message, payload.sessionKey || payload.context);
-          return { type: 'response', payload: response };
+          
+          const { message, sessionKey, agentId: requestedAgentId } = payload;
+          
+          // 选择 Agent
+          const agent = await agentFactory.select(message, {
+            sessionKey,
+            agentId: requestedAgentId,
+          });
+          
+          if (!agent) {
+            return { type: 'error', payload: { message: 'No available agent' } };
+          }
+          
+          // 更新客户端当前 Agent
+          if (client) {
+            client.currentAgent = agent.metadata.id;
+          }
+          
+          const response = await agent.chat(message, sessionKey);
+          
+          return { 
+            type: 'response', 
+            payload: {
+              ...response,
+              agentId: agent.metadata.id,
+              agentName: agent.metadata.name,
+            }
+          };
+        }
 
-        case 'tool_call':
+        case 'switch_agent': {
+          // 切换当前会话的 Agent
+          const { sessionKey, agentId: newAgentId } = payload;
+          
+          const result = agentFactory.switchSessionAgent(sessionKey, newAgentId);
+          
+          if (result.success && client) {
+            client.currentAgent = newAgentId;
+          }
+          
+          return { type: 'agent_switched', payload: result };
+        }
+
+        case 'tool_call': {
           const result = await toolRegistry.execute(payload.tool, payload.args);
           return { type: 'tool_result', payload: result };
+        }
 
         case 'ping':
           return { type: 'pong' };
 
-        case 'stats':
-          return { type: 'stats', payload: stats };
+        case 'stats': {
+          const agentStats = agentFactory?.getStats() || {};
+          return { 
+            type: 'stats', 
+            payload: {
+              ...stats,
+              agents: agentStats,
+            }
+          };
+        }
+
+        case 'agents': {
+          return {
+            type: 'agents',
+            payload: {
+              agents: agentFactory?.getAllInfo() || [],
+              default: agentFactory?.getDefault?.()?.metadata?.id,
+            }
+          };
+        }
 
         default:
           return { type: 'error', payload: { message: `Unknown type: ${type}` } };
@@ -375,22 +536,23 @@ export function createGateway(config, deps) {
       await fastify.listen({ port: config.port, host: config.host });
       logger.info(`Gateway 监听 ${config.host}:${config.port}`);
       logger.info(`API 端点:`);
-      logger.info(`  GET  /health   - 健康检查`);
-      logger.info(`  GET  /stats    - 统计信息`);
-      logger.info(`  GET  /sessions - 会话列表`);
-      logger.info(`  GET  /tools    - 工具列表`);
-      logger.info(`  GET  /skills   - 技能列表`);
-      logger.info(`  POST /chat     - 发送消息`);
-      logger.info(`  WS   /ws       - WebSocket 连接`);
+      logger.info(`  GET  /health       - 健康检查`);
+      logger.info(`  GET  /stats        - 统计信息`);
+      logger.info(`  GET  /agents       - Agent 列表`);
+      logger.info(`  GET  /agents/:id   - Agent 详情`);
+      logger.info(`  GET  /sessions     - 会话列表`);
+      logger.info(`  GET  /tools        - 工具列表`);
+      logger.info(`  GET  /skills       - 技能列表`);
+      logger.info(`  POST /chat         - 发送消息`);
+      logger.info(`  WS   /ws           - WebSocket 连接`);
     },
     
     async stop() {
-      // 保存会话
-      agent?.sessionManager?.close?.();
+      // 关闭所有 Agent 的会话
+      agentFactory?.close?.();
       await fastify.close();
     },
     
-    // 广播消息
     broadcast(msg) {
       const data = JSON.stringify(msg);
       for (const [_, client] of wsClients) {
@@ -398,7 +560,6 @@ export function createGateway(config, deps) {
       }
     },
     
-    // 发送给指定客户端
     send(clientId, msg) {
       const client = wsClients.get(clientId);
       if (client) {

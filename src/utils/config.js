@@ -172,7 +172,7 @@ function validateConfig(config, rules, path = '') {
  * 加载配置文件
  */
 export async function loadConfig() {
-  // 查找配置文件
+  // 查找主配置文件
   const configPaths = [
     join(process.cwd(), 'config', 'config.yaml'),
     join(process.cwd(), 'config.yaml'),
@@ -220,6 +220,12 @@ export async function loadConfig() {
     config.isProduction = config.env === 'production';
     config.isDevelopment = config.env === 'development';
     
+    // 尝试加载多 Agent 配置
+    const agentsConfig = await loadAgentsConfig();
+    if (agentsConfig) {
+      config.agents = agentsConfig;
+    }
+    
     logger.info('配置加载成功');
     
     return config;
@@ -227,6 +233,53 @@ export async function loadConfig() {
   } catch (err) {
     logger.error('配置加载失败:', err.message);
     throw err;
+  }
+}
+
+/**
+ * 加载多 Agent 配置
+ */
+export async function loadAgentsConfig() {
+  const agentsConfigPaths = [
+    join(process.cwd(), 'config', 'agents.yaml'),
+    join(process.cwd(), 'agents.yaml'),
+    join(__dirname, '../../config/agents.yaml'),
+  ];
+  
+  let configPath = null;
+  for (const path of agentsConfigPaths) {
+    if (existsSync(path)) {
+      configPath = path;
+      break;
+    }
+  }
+  
+  if (!configPath) {
+    logger.debug('多 Agent 配置文件未找到，使用单 Agent 模式');
+    return null;
+  }
+  
+  logger.info(`加载多 Agent 配置: ${configPath}`);
+  
+  try {
+    const content = readFileSync(configPath, 'utf-8');
+    let config = parse(content);
+    
+    // 替换环境变量
+    config = substituteEnvVars(config);
+    
+    // 验证必要的配置项
+    if (!config.agents || Object.keys(config.agents).length === 0) {
+      logger.warn('多 Agent 配置中没有定义任何 Agent');
+      return null;
+    }
+    
+    logger.info(`已加载 ${Object.keys(config.agents).length} 个 Agent 配置`);
+    return config;
+    
+  } catch (err) {
+    logger.warn('加载多 Agent 配置失败:', err.message);
+    return null;
   }
 }
 
