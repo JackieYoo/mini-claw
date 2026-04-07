@@ -1,0 +1,34 @@
+# MiniClaw Configuration
+
+gateway:
+  port: 18790
+  host: "0.0.0.0"
+
+model:
+  provider: openai-compatible
+  base_url: ${MODEL_API_BASE}
+  api_key: ${MODEL_API_KEY}
+  model: ${MODEL_NAME}
+  temperature: 0.7
+  max_tokens: 4096
+  system_prompt: |
+    你是一个智能助手。
+    你可以使用工具帮助用户完成任务。
+    请简洁、准确地回答问题。
+
+channels:
+  feishu:
+    enabled: true
+    # 飞书应用凭证（长连接模式）
+    app_id: ${FEISHU_APP_ID}
+    app_secret: ${FEISHU_APP_SECRET}
+
+tools:
+  enabled:
+    - shell
+    - file_read
+    - file_write
+    - web_search
+
+logging:
+  level: info  # debug, info, warn, error

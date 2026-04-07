@@ -1,0 +1,44 @@
+{
+  "name": "mini-claw",
+  "version": "0.2.0",
+  "description": "A minimal AI assistant framework inspired by OpenClaw",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "vitest",
+    "test:watch": "vitest --watch",
+    "test:coverage": "vitest --coverage",
+    "test:ui": "vitest --ui",
+    "chat": "node -e \"const c = require('openai'); console.log('Test OpenAI client')\""
+  },
+  "dependencies": {
+    "@fastify/cors": "^9.0.1",
+    "@fastify/websocket": "^10.0.1",
+    "@larksuiteoapi/node-sdk": "^1.20.0",
+    "dotenv": "^16.4.1",
+    "fastify": "^4.26.0",
+    "openai": "^4.28.0",
+    "pino": "^8.18.0",
+    "pino-pretty": "^10.3.1",
+    "yaml": "^2.3.4"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "ai",
+    "assistant",
+    "bot",
+    "feishu",
+    "openai",
+    "chatbot"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.0",
+    "@vitest/ui": "^4.1.0",
+    "vitest": "^4.1.0"
+  }
+}
