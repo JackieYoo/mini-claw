@@ -174,6 +174,14 @@ export function createFeishuChannel(config) {
     }
   }
   
+  // 健康检查配置
+  const HEALTH_CHECK_CONFIG = {
+    interval: 30000,           // 检查间隔 30 秒
+    messageTimeout: 180000,    // 消息超时 3 分钟（原 1 分钟太短）
+    gracePeriod: 120000,       // 连接后宽限期 2 分钟
+    maxFailures: 3,            // 最大失败次数
+  };
+
   function startHealthCheck() {
     if (healthCheckTimer) {
       clearInterval(healthCheckTimer);
@@ -182,22 +190,37 @@ export function createFeishuChannel(config) {
     healthCheckTimer = setInterval(() => {
       const now = Date.now();
 
-      if (connectionState.status === 'connected' && connectionState.lastMessageAt) {
-        const timeSinceLastMessage = now - connectionState.lastMessageAt;
+      // 只在连接状态下检查
+      if (connectionState.status !== 'connected') {
+        return;
+      }
 
-        if (timeSinceLastMessage > 60000) {
-          connectionState.healthCheckFailures++;
-          logger.warn(`健康检查失败: ${connectionState.healthCheckFailures}/${connectionState.maxHealthCheckFailures} 次未收到消息`);
+      // 连接后的宽限期内不检查
+      const timeSinceConnected = now - connectionState.connectedAt;
+      if (timeSinceConnected < HEALTH_CHECK_CONFIG.gracePeriod) {
+        logger.debug(`连接宽限期中，跳过健康检查 (${Math.floor(timeSinceConnected / 1000)}s/${HEALTH_CHECK_CONFIG.gracePeriod / 1000}s)`);
+        return;
+      }
 
-          if (connectionState.healthCheckFailures >= connectionState.maxHealthCheckFailures) {
-            logger.error('健康检查失败次数过多，触发重连...');
-            reconnect(agentFactory);
-          }
-        } else {
+      // 如果没有收到过消息，使用连接时间作为参考
+      const referenceTime = connectionState.lastMessageAt || connectionState.connectedAt;
+      const timeSinceLastMessage = now - referenceTime;
+
+      if (timeSinceLastMessage > HEALTH_CHECK_CONFIG.messageTimeout) {
+        connectionState.healthCheckFailures++;
+        logger.warn(`健康检查失败: ${connectionState.healthCheckFailures}/${HEALTH_CHECK_CONFIG.maxFailures} 次未收到消息 (已等待 ${Math.floor(timeSinceLastMessage / 1000)}s)`);
+
+        if (connectionState.healthCheckFailures >= HEALTH_CHECK_CONFIG.maxFailures) {
+          logger.error(`健康检查失败次数过多，触发重连...`);
+          reconnect(agentFactory);
+        }
+      } else {
+        if (connectionState.healthCheckFailures > 0) {
+          logger.info('健康检查恢复，消息接收正常');
           connectionState.healthCheckFailures = 0;
         }
       }
-    }, HEALTH_CHECK_INTERVAL);
+    }, HEALTH_CHECK_CONFIG.interval);
 
     logger.debug('健康检查已启动');
   }
@@ -221,12 +244,19 @@ export function createFeishuChannel(config) {
     agentFactory = factory;
 
     if (!app_id || !app_secret) {
-      throw new Error('飞书 App ID 或 App Secret 未配置');
+      logger.warn('飞书 App ID 或 App Secret 未配置，跳过连接');
+      return false;
+    }
+
+    // 验证凭证格式
+    if (app_id.includes('your-') || app_secret.includes('your-')) {
+      logger.warn('飞书凭证使用了占位符，请在 .env 文件中配置真实值');
+      return false;
     }
 
     connectionState.status = 'connecting';
     logger.info(`正在连接飞书长连接...`);
-    logger.info(`App ID: ${app_id}`);
+    logger.info(`App ID: ${app_id.substring(0, 8)}...`);
 
     try {
       await fetchBotInfo();
@@ -235,7 +265,7 @@ export function createFeishuChannel(config) {
         appId: app_id,
         appSecret: app_secret,
         domain: resolveDomain(domain),
-        loggerLevel: Lark.LoggerLevel.info,
+        loggerLevel: process.env.DEBUG === 'true' ? Lark.LoggerLevel.debug : Lark.LoggerLevel.warn,
       });
 
       eventDispatcher = new Lark.EventDispatcher({});
@@ -249,7 +279,7 @@ export function createFeishuChannel(config) {
             logger.error('处理消息事件错误:', err);
           }
         },
-        
+
         'im.chat.member.bot.added_v1': async (data) => {
           logger.info(`机器人被添加到群聊: ${data.chat_id}`);
           const agents = agentFactory?.getAllInfo?.() || [];
@@ -260,22 +290,22 @@ export function createFeishuChannel(config) {
           welcomeMsg += '\n使用 @agent-name 指定 Agent，或 /agents 查看全部';
           await sendMessage(data.chat_id, 'chat_id', welcomeMsg);
         },
-        
+
         'im.chat.member.bot.deleted_v1': async (data) => {
           logger.info(`机器人被移出群聊: ${data.chat_id}`);
         },
-        
+
         'im.message.reaction.created_v1': async (data) => {
           const emojiType = data.reaction_type?.emoji_type;
           const emoji = EMOJI_TYPES[emojiType] || emojiType;
           logger.debug(`收到表情回复: ${emoji} (消息ID: ${data.message_id})`);
         },
-        
+
         'im.message.reaction.deleted_v1': async (data) => {
           logger.debug(`表情回复被移除 (消息ID: ${data.message_id})`);
         },
       });
-      
+
       wsClient.start({ eventDispatcher });
       reconnectAttempts = 0;
 
@@ -287,11 +317,26 @@ export function createFeishuChannel(config) {
       startHealthCheck();
 
       logger.info('✅ 飞书长连接已建立');
-      
+      return true;
+
     } catch (err) {
-      logger.error('连接飞书长连接失败:', err);
-      await reconnect(factory);
-      throw err;
+      logger.error('连接飞书长连接失败:', err.message);
+
+      // 根据错误类型提供具体建议
+      if (err.message?.includes('app_id') || err.message?.includes('app_secret')) {
+        logger.error('💡 请检查 .env 文件中的 FEISHU_APP_ID 和 FEISHU_APP_SECRET');
+      } else if (err.message?.includes('timeout') || err.message?.includes('ETIMEDOUT')) {
+        logger.error('💡 网络连接超时，请检查网络连接');
+      }
+
+      // 尝试重连
+      if (reconnectAttempts < maxReconnectAttempts) {
+        await reconnect(factory);
+      } else {
+        logger.error('飞书连接失败，Gateway 将继续运行但飞书功能不可用');
+      }
+
+      return false;
     }
   }
   
@@ -751,11 +796,32 @@ export function createFeishuChannel(config) {
 
   function disconnect() {
     stopHealthCheck();
+
+    // 清理 WebSocket 客户端
     if (wsClient) {
-      wsClient.stop?.();
+      try {
+        wsClient.stop?.();
+      } catch (err) {
+        logger.warn('停止飞书 WebSocket 客户端时出错:', err.message);
+      }
       wsClient = null;
+    }
+
+    // 清理事件分发器
+    if (eventDispatcher) {
+      try {
+        eventDispatcher.removeAllListeners?.();
+      } catch (err) {
+        // 忽略错误
+      }
       eventDispatcher = null;
     }
+
+    // 清理会话绑定
+    sessionAgentBindings.clear();
+
+    connectionState.status = 'disconnected';
+    logger.info('飞书通道已断开');
   }
   
   function isConnected() {

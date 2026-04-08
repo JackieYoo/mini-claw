@@ -9,21 +9,85 @@ import cors from '@fastify/cors';
 import { createLogger } from '../utils/logger.js';
 import { createAuth } from '../utils/auth.js';
 import { extractAgentMention, parseAgentCommand } from '../agent/router.js';
+import net from 'net';
 
 const logger = createLogger('gateway');
+
+/**
+ * 检查端口是否可用
+ * @param {number} port - 端口号
+ * @param {string} host - 主机地址
+ * @returns {Promise<boolean>} - 是否可用
+ */
+function isPortAvailable(port, host = '0.0.0.0') {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+
+    server.once('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        resolve(false);
+      } else {
+        resolve(false);
+      }
+    });
+
+    server.once('listening', () => {
+      server.close();
+      resolve(true);
+    });
+
+    server.listen(port, host);
+  });
+}
+
+/**
+ * 查找可用端口
+ * @param {number} startPort - 起始端口
+ * @param {string} host - 主机地址
+ * @param {number} maxAttempts - 最大尝试次数
+ * @returns {Promise<number|null>} - 可用端口号或null
+ */
+async function findAvailablePort(startPort, host = '0.0.0.0', maxAttempts = 10) {
+  for (let i = 0; i < maxAttempts; i++) {
+    const port = startPort + i;
+    if (await isPortAvailable(port, host)) {
+      return port;
+    }
+    logger.warn(`端口 ${port} 被占用，尝试下一个...`);
+  }
+  return null;
+}
 
 export function createGateway(config, deps) {
   const { agentFactory, channelManager, toolRegistry, skillsLoader } = deps;
 
-  const fastify = Fastify({ logger: false });
+  const fastify = Fastify({
+    logger: false,
+    // 增加请求体大小限制
+    bodyLimit: 10 * 1024 * 1024, // 10MB
+  });
   fastify.register(websocket);
-  fastify.register(cors, { origin: '*' });
+  fastify.register(cors, {
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key'],
+  });
 
   // ==================== 认证中间件 ====================
+  // 如果没有配置 API_KEYS，禁用认证（便于本地开发）
+  const apiKeys = process.env.API_KEYS?.split(',').filter(Boolean) || [];
+  const enableAuth = apiKeys.length > 0;
+  
+  if (enableAuth) {
+    logger.info(`已启用 API Key 认证，共 ${apiKeys.length} 个密钥`);
+  } else {
+    logger.info('未配置 API_KEYS，认证已禁用（仅用于本地开发）');
+  }
+  
   const authMiddleware = createAuth({
-    enableApiKey: true,
-    publicPaths: ['/health', '/', '/ws'], // WebSocket 路径单独处理认证
-    apiKeys: process.env.API_KEYS?.split(',').filter(Boolean),
+    enableApiKey: enableAuth,
+    publicPaths: ['/health', '/', '/ws', '/agents', '/agents/*', '/tools', '/skills'], // 公开只读端点
+    apiKeys,
   });
 
   // 注册认证中间件
@@ -528,42 +592,199 @@ export function createGateway(config, deps) {
   }
   
   // ==================== 返回 Gateway 实例 ====================
+  let actualPort = config.port;
+  let isRunning = false;
+
   return {
     fastify,
     stats,
-    
-    async start() {
-      await fastify.listen({ port: config.port, host: config.host });
-      logger.info(`Gateway 监听 ${config.host}:${config.port}`);
-      logger.info(`API 端点:`);
-      logger.info(`  GET  /health       - 健康检查`);
-      logger.info(`  GET  /stats        - 统计信息`);
-      logger.info(`  GET  /agents       - Agent 列表`);
-      logger.info(`  GET  /agents/:id   - Agent 详情`);
-      logger.info(`  GET  /sessions     - 会话列表`);
-      logger.info(`  GET  /tools        - 工具列表`);
-      logger.info(`  GET  /skills       - 技能列表`);
-      logger.info(`  POST /chat         - 发送消息`);
-      logger.info(`  WS   /ws           - WebSocket 连接`);
+    get port() { return actualPort; },
+    get isRunning() { return isRunning; },
+
+    /**
+     * 启动 Gateway
+     * @param {Object} options - 启动选项
+     * @param {boolean} options.autoPort - 端口冲突时是否自动切换
+     * @param {number} options.maxPortAttempts - 最大端口尝试次数
+     */
+    async start(options = {}) {
+      const { autoPort = true, maxPortAttempts = 10 } = options;
+
+      let targetPort = config.port;
+      let targetHost = config.host || '0.0.0.0';
+
+      // 检查端口是否可用
+      if (!(await isPortAvailable(targetPort, targetHost))) {
+        if (autoPort) {
+          logger.warn(`端口 ${targetPort} 已被占用，尝试查找可用端口...`);
+          const availablePort = await findAvailablePort(targetPort, targetHost, maxPortAttempts);
+
+          if (availablePort) {
+            logger.info(`找到可用端口: ${availablePort}`);
+            targetPort = availablePort;
+          } else {
+            throw new Error(
+              `无法找到可用端口（尝试范围: ${config.port}-${config.port + maxPortAttempts - 1}）。` +
+              `请手动指定一个可用端口，或关闭占用端口的程序。`
+            );
+          }
+        } else {
+          throw new Error(
+            `端口 ${targetPort} 已被占用。` +
+            `请修改 config/config.yaml 中的 gateway.port，或关闭占用该端口的程序。`
+          );
+        }
+      }
+
+      try {
+        await fastify.listen({ port: targetPort, host: targetHost });
+        actualPort = targetPort;
+        isRunning = true;
+
+        logger.info(`✅ Gateway 启动成功`);
+        logger.info(`   监听地址: ${targetHost}:${actualPort}`);
+
+        // 如果使用了自动切换的端口，提示用户
+        if (actualPort !== config.port) {
+          logger.info(`   原配置端口: ${config.port} → 实际使用端口: ${actualPort}`);
+          logger.info(`   提示: 如需固定端口，请修改 config/config.yaml`);
+        }
+
+        logger.info(`API 端点:`);
+        logger.info(`  GET  /health       - 健康检查`);
+        logger.info(`  GET  /stats        - 统计信息`);
+        logger.info(`  GET  /agents       - Agent 列表`);
+        logger.info(`  GET  /agents/:id   - Agent 详情`);
+        logger.info(`  GET  /sessions     - 会话列表`);
+        logger.info(`  GET  /tools        - 工具列表`);
+        logger.info(`  GET  /skills       - 技能列表`);
+        logger.info(`  POST /chat         - 发送消息`);
+        logger.info(`  WS   /ws           - WebSocket 连接`);
+
+        return { port: actualPort, host: targetHost };
+      } catch (err) {
+        isRunning = false;
+
+        // 提供更友好的错误信息
+        if (err.code === 'EADDRINUSE') {
+          throw new Error(
+            `端口 ${targetPort} 已被占用。` +
+            `请检查是否有其他 MiniClaw 实例正在运行，或修改配置文件中的端口号。`
+          );
+        }
+
+        if (err.code === 'EACCES') {
+          throw new Error(
+            `没有权限绑定端口 ${targetPort}。` +
+            `请尝试使用大于 1024 的端口号，或以管理员权限运行。`
+          );
+        }
+
+        throw err;
+      }
     },
-    
+
     async stop() {
-      // 关闭所有 Agent 的会话
-      agentFactory?.close?.();
-      await fastify.close();
-    },
-    
-    broadcast(msg) {
-      const data = JSON.stringify(msg);
-      for (const [_, client] of wsClients) {
-        client.connection.socket.send(data);
+      if (!isRunning) {
+        logger.debug('Gateway 未在运行，跳过停止');
+        return;
+      }
+
+      logger.info('正在关闭 Gateway...');
+
+      try {
+        // 关闭所有 Agent 的会话
+        agentFactory?.close?.();
+
+        // 关闭 Fastify 服务器
+        await fastify.close();
+        isRunning = false;
+
+        logger.info('Gateway 已关闭');
+      } catch (err) {
+        logger.error('关闭 Gateway 时出错:', err.message);
+        throw err;
       }
     },
     
+    /**
+     * 广播消息到所有 WebSocket 客户端
+     * @param {Object} msg - 要广播的消息
+     * @returns {number} - 成功发送的客户端数量
+     */
+    broadcast(msg) {
+      if (wsClients.size === 0) return 0;
+
+      let sentCount = 0;
+      const data = JSON.stringify(msg);
+
+      for (const [id, client] of wsClients) {
+        try {
+          if (client.connection.socket.readyState === 1) { // OPEN state
+            client.connection.socket.send(data);
+            sentCount++;
+          }
+        } catch (err) {
+          logger.warn(`广播消息到客户端 ${id} 失败:`, err.message);
+        }
+      }
+
+      return sentCount;
+    },
+
+    /**
+     * 发送消息到指定客户端
+     * @param {string} clientId - 客户端 ID
+     * @param {Object} msg - 要发送的消息
+     * @returns {boolean} - 是否成功发送
+     */
     send(clientId, msg) {
       const client = wsClients.get(clientId);
-      if (client) {
-        client.connection.socket.send(JSON.stringify(msg));
+      if (!client) return false;
+
+      try {
+        if (client.connection.socket.readyState === 1) { // OPEN state
+          client.connection.socket.send(JSON.stringify(msg));
+          return true;
+        }
+      } catch (err) {
+        logger.warn(`发送消息到客户端 ${clientId} 失败:`, err.message);
+      }
+
+      return false;
+    },
+
+    /**
+     * 获取 WebSocket 客户端信息
+     * @returns {Array} - 客户端信息列表
+     */
+    getClients() {
+      return Array.from(wsClients.entries()).map(([id, client]) => ({
+        id,
+        connectedAt: client.connectedAt,
+        messages: client.messages,
+        currentAgent: client.currentAgent,
+      }));
+    },
+
+    /**
+     * 断开指定客户端连接
+     * @param {string} clientId - 客户端 ID
+     * @param {number} code - 关闭代码
+     * @param {string} reason - 关闭原因
+     * @returns {boolean} - 是否成功断开
+     */
+    disconnectClient(clientId, code = 1000, reason = 'Server initiated disconnect') {
+      const client = wsClients.get(clientId);
+      if (!client) return false;
+
+      try {
+        client.connection.socket.close(code, reason);
+        wsClients.delete(clientId);
+        return true;
+      } catch (err) {
+        logger.warn(`断开客户端 ${clientId} 连接失败:`, err.message);
+        return false;
       }
     }
   };

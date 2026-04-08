@@ -54,9 +54,11 @@ describe('Session Manager', () => {
       const key2 = sessionManager.generateSessionKey(context);
 
       expect(key1).toBe(key2);
-      // The key format may vary, just check it contains the channel and type
+      // The key format now includes agentId prefix: default:test:dm:123
       expect(key1).toContain('test');
       expect(key1).toContain('dm');
+      // Check that it has the agentId prefix (default:)
+      expect(key1).toContain('default:');
     });
 
     it('should use dmScope correctly', () => {
@@ -73,14 +75,29 @@ describe('Session Manager', () => {
       const key1 = perChannelPeer.generateSessionKey(context);
       const key2 = main.generateSessionKey(context);
 
-      // per-channel-peer uses chatId for DM
-      expect(key1).toBe('test:dm:123');
+      // per-channel-peer uses chatId for DM, now with agentId prefix: default:test:dm:123
+      expect(key1).toBe('default:test:dm:123');
 
-      // main scope returns 'main' for all
-      expect(key2).toBe('main');
+      // main scope returns 'default:main' (with agentId prefix)
+      expect(key2).toBe('default:main');
 
       perChannelPeer.close();
       main.close();
+    });
+
+    it('should include agentId in key when specified', () => {
+      const context = {
+        agentId: 'code',
+        channel: 'test',
+        chatType: 'dm',
+        chatId: '123',
+        senderId: 'user1',
+      };
+
+      const key = sessionManager.generateSessionKey(context);
+
+      // Key should include the specified agentId
+      expect(key).toBe('code:test:dm:123');
     });
   });
 

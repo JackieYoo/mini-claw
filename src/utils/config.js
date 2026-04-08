@@ -66,7 +66,7 @@ function substituteEnvVars(value) {
  */
 const validationRules = {
   gateway: {
-    port: { type: 'number', min: 1, max: 65535, required: true },
+    port: { type: 'number', min: 1024, max: 65535, required: true },
     host: { type: 'string', required: false, default: '0.0.0.0' },
   },
   model: {
@@ -219,15 +219,31 @@ export async function loadConfig() {
     config.env = process.env.NODE_ENV || 'development';
     config.isProduction = config.env === 'production';
     config.isDevelopment = config.env === 'development';
-    
+
+    // 环境变量覆盖配置（优先级最高）
+    if (process.env.PORT) {
+      const portNum = parseInt(process.env.PORT, 10);
+      if (!isNaN(portNum) && portNum >= 1024 && portNum <= 65535) {
+        config.gateway.port = portNum;
+        logger.info(`端口被环境变量覆盖: ${portNum}`);
+      } else {
+        logger.warn(`环境变量 PORT 无效: ${process.env.PORT}，使用配置值`);
+      }
+    }
+
+    if (process.env.HOST) {
+      config.gateway.host = process.env.HOST;
+      logger.info(`主机被环境变量覆盖: ${process.env.HOST}`);
+    }
+
     // 尝试加载多 Agent 配置
     const agentsConfig = await loadAgentsConfig();
     if (agentsConfig) {
       config.agents = agentsConfig;
     }
-    
+
     logger.info('配置加载成功');
-    
+
     return config;
     
   } catch (err) {

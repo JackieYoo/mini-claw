@@ -1,11 +1,13 @@
 /**
  * MiniClaw - Multi-Agent AI Assistant Framework
  * 支持多 Agent 智能路由的精简版 AI 助手
- * 
+ *
  * Entry point
  */
 
-import 'dotenv/config';
+// 强制使用 .env 文件中的值覆盖系统环境变量
+import { config } from 'dotenv';
+config({ override: true });
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { homedir } from 'os';
@@ -151,10 +153,32 @@ async function main() {
   });
   
   // 启动 Gateway
-  await gateway.start();
-  
+  let gatewayInfo;
+  try {
+    gatewayInfo = await gateway.start({ autoPort: true, maxPortAttempts: 10 });
+  } catch (err) {
+    logger.error('Gateway 启动失败:', err.message);
+
+    // 提供针对性的错误建议
+    if (err.message.includes('EADDRINUSE') || err.message.includes('被占用')) {
+      console.error('\n💡 端口冲突解决方案:');
+      console.error('   1. 修改 config/config.yaml 中的 gateway.port');
+      console.error('   2. 查找占用端口的进程并关闭:');
+      console.error(`      lsof -i :${config.gateway.port}`);
+      console.error('   3. 使用环境变量覆盖端口:');
+      console.error(`      PORT=30000 npm start`);
+    }
+
+    throw err;
+  }
+
   // 连接所有通道（传入 agentFactory 供多 Agent 使用）
-  await channelManager.connectAll(agentFactory);
+  try {
+    await channelManager.connectAll(agentFactory);
+  } catch (err) {
+    logger.error('通道连接失败:', err.message);
+    logger.warn('Gateway 将继续运行，但部分通道可能不可用');
+  }
   
   console.log('');
   logger.info('✅ MiniClaw 已启动，等待消息...');
@@ -221,10 +245,20 @@ main().catch((err) => {
   console.error('');
   console.error('❌ 启动失败:', err.message);
   console.error('');
-  
+
   // 提供详细的排查建议
-  if (err.message.includes('API Key')) {
-    console.error('授权问题排查:');
+  if (err.message.includes('EADDRINUSE') || err.message.includes('被占用') || err.message.includes('端口')) {
+    console.error('🔌 端口问题排查:');
+    console.error('  1. 修改 config/config.yaml 中的 gateway.port');
+    console.error(`     当前配置端口: ${process.env.CONFIG_PORT || '18791'}`);
+    console.error('  2. 查找占用端口的进程:');
+    console.error(`     lsof -i :${process.env.CONFIG_PORT || '18791'}`);
+    console.error('  3. 关闭占用进程:');
+    console.error(`     kill -9 <PID>`);
+    console.error('  4. 或使用环境变量覆盖:');
+    console.error('     PORT=30000 npm start');
+  } else if (err.message.includes('API Key') || err.message.includes('api_key') || err.message.includes('401')) {
+    console.error('🔑 授权问题排查:');
     console.error('  1. 检查 .env 文件是否存在');
     console.error('  2. 检查 MODEL_API_KEY 是否正确设置');
     console.error('  3. 检查 MODEL_API_BASE 是否正确');
@@ -232,20 +266,35 @@ main().catch((err) => {
     console.error('');
     console.error('快速检查命令:');
     console.error('  cat .env | grep -E "(API_KEY|APP_SECRET)"');
-  } else if (err.message.includes('配置')) {
-    console.error('配置问题排查:');
+  } else if (err.message.includes('配置') || err.message.includes('yaml') || err.message.includes('YAML')) {
+    console.error('⚙️  配置问题排查:');
     console.error('  1. 检查 config/config.yaml 是否存在');
     console.error('  2. 如果是多 Agent 模式，检查 config/agents.yaml 是否存在');
-    console.error('  3. 检查 YAML 格式是否正确（可以使用 yamllint）');
+    console.error('  3. 检查 YAML 格式是否正确:');
+    console.error('     npx yaml-lint config/config.yaml');
+  } else if (err.message.includes('network') || err.message.includes('ECONNREFUSED') || err.message.includes('timeout')) {
+    console.error('🌐 网络问题排查:');
+    console.error('  1. 检查网络连接');
+    console.error('  2. 检查 MODEL_API_BASE 是否可访问');
+    console.error('  3. 检查是否需要配置代理');
   } else {
-    console.error('请检查:');
+    console.error('💡 通用排查建议:');
     console.error('  1. 确保 .env 文件存在且配置正确');
     console.error('  2. 检查 MODEL_API_KEY 是否有效');
     console.error('  3. 检查 MODEL_API_BASE 是否可访问');
     console.error('  4. 检查飞书配置是否正确（如果使用）');
+    console.error('  5. 查看详细错误信息（添加 DEBUG=true）');
   }
-  
+
   console.error('');
-  console.error('详细错误:', err);
+
+  // 只在 DEBUG 模式下显示详细错误堆栈
+  if (process.env.DEBUG === 'true' || process.env.NODE_ENV === 'development') {
+    console.error('详细错误堆栈:');
+    console.error(err);
+  } else {
+    console.error('使用 DEBUG=true 查看详细错误信息');
+  }
+
   process.exit(1);
 });

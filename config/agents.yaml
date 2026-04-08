@@ -2,6 +2,22 @@
 # MiniClaw 多 Agent 配置
 # ============================================
 
+# 模型配置
+models:
+  # 可用模型列表
+  available:
+    - name: glm-5
+      description: GLM-5 标准版，平衡性能与速度
+    - name: glm-5.1
+      description: GLM-5.1 增强版，更强的推理能力
+    - name: qwen3.6-plus
+      description: Qwen3.6 Plus，通义千问增强版
+  
+  # 模型别名映射（可选）
+  aliases:
+    glm: glm-5
+    qwen: qwen3.6-plus
+
 # 全局默认配置
 defaults:
   api_key: ${MODEL_API_KEY}
@@ -57,7 +73,7 @@ agents:
   code:
     name: 代码助手
     description: 专业处理编程、代码审查、调试、技术问题
-    model: ${MODEL_NAME:-glm-5}
+    model: qwen3.6-plus  # 使用 Qwen3.6 Plus，代码能力更强
     temperature: 0.3
     system_prompt: |
       你是专业的代码助手，精通多种编程语言和技术栈。
@@ -105,11 +121,11 @@ agents:
         - "\\.java$"
         - "\\.go$"
         - "\\.rs$"
-        - function\s+\w+
-        - class\s+\w+
-        - import\s+\w+
-        - const\s+\w+
-        - let\s+\w+
+        - function\\s+\\w+
+        - class\\s+\\w+
+        - import\\s+\\w+
+        - const\\s+\\w+
+        - let\\s+\\w+
 
   # ============================================
   # 文档助手
@@ -117,7 +133,7 @@ agents:
   doc:
     name: 文档助手
     description: 处理文档编辑、总结、飞书文档、会议纪要
-    model: ${MODEL_NAME:-glm-5}
+    model: glm-5.1  # 使用 GLM-5.1，文档处理能力更强
     temperature: 0.5
     system_prompt: |
       你是专业的文档处理助手，擅长文档编辑、内容总结和知识管理。
@@ -216,7 +232,7 @@ agents:
   research:
     name: 研究助手
     description: 深度研究、信息搜集、竞品分析、资料整理
-    model: ${MODEL_NAME:-glm-5}
+    model: glm-5.1  # 使用 GLM-5.1，推理能力更强
     temperature: 0.7
     system_prompt: |
       你是专业的研究助手，擅长信息搜集、深度分析和知识整理。

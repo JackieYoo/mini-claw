@@ -1,7 +1,7 @@
 # MiniClaw Configuration
 
 gateway:
-  port: 18790
+  port: 18791
   host: "0.0.0.0"
 
 model:
