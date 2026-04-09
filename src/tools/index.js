@@ -67,7 +67,7 @@ export function createToolRegistry(options = {}) {
     return tools.has(name);
   }
   
-  async function execute(name, args) {
+  async function execute(name, args, timeoutMs = 30000) {
     const tool = tools.get(name);
     if (!tool) {
       throw new Error(`工具不存在: ${name}`);
@@ -90,8 +90,15 @@ export function createToolRegistry(options = {}) {
         }
       }
 
-      // 执行工具
-      const result = await tool.execute(args || {});
+      // 执行工具（带超时控制）
+      const executeWithTimeout = Promise.race([
+        tool.execute(args || {}),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`工具执行超时: ${name} 超过 ${timeoutMs}ms`)), timeoutMs)
+        )
+      ]);
+
+      const result = await executeWithTimeout;
       const duration = Date.now() - startTime;
       logger.info(`工具完成: ${name} (${duration}ms)`);
 

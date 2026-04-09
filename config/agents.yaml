@@ -1,0 +1,276 @@
+# ============================================
+# MiniClaw 多 Agent 配置
+# ============================================
+
+# 模型配置
+models:
+  # 可用模型列表
+  available:
+    - name: glm-5
+      description: GLM-5 标准版，平衡性能与速度
+    - name: glm-5.1
+      description: GLM-5.1 增强版，更强的推理能力
+    - name: qwen3.6-plus
+      description: Qwen3.6 Plus，通义千问增强版
+  
+  # 模型别名映射（可选）
+  aliases:
+    glm: glm-5
+    qwen: qwen3.6-plus
+
+# 全局默认配置
+defaults:
+  api_key: ${MODEL_API_KEY}
+  base_url: ${MODEL_API_BASE}
+  temperature: 0.7
+  max_tokens: 4096
+  max_history: 50
+
+# Agent 路由配置
+router:
+  # 路由策略: pattern(关键词匹配) | llm(LLM智能判断) | hybrid(混合)
+  strategy: hybrid
+  default_agent: default
+  # LLM 路由配置（当 strategy 为 llm 或 hybrid 时使用）
+  llm:
+    model: glm-5
+    temperature: 0
+    max_tokens: 50
+
+# Agent 定义
+agents:
+  # ============================================
+  # 默认通用助手
+  # ============================================
+  default:
+    name: 通用助手
+    description: 通用 AI 助手，处理日常对话和简单任务
+    model: ${MODEL_NAME:-glm-5}
+    system_prompt: |
+      你是一个友好的 AI 助手。请简洁、准确地回答用户问题。
+      如果需要使用工具来完成任务，请调用相应的工具函数。
+      当用户问题涉及代码、文档等专业领域时，建议用户使用专业 Agent：
+      - @code 或 /agent code - 代码助手
+      - @doc 或 /agent doc - 文档助手
+    tools:
+      - shell
+      - file_read
+      - file_write
+      - web_search
+      - http_request
+      - memory
+    skills:
+      - file
+      - web
+    route:
+      # 默认兜底，最低优先级
+      priority: 0
+      patterns: []
+
+  # ============================================
+  # 代码助手
+  # ============================================
+  code:
+    name: 代码助手
+    description: 专业处理编程、代码审查、调试、技术问题
+    model: qwen3.6-plus  # 使用 Qwen3.6 Plus，代码能力更强
+    temperature: 0.3
+    system_prompt: |
+      你是专业的代码助手，精通多种编程语言和技术栈。
+      
+      你的专长：
+      1. 代码编写与审查 - 编写高质量、可维护的代码
+      2. Bug 调试 - 分析错误日志，定位问题根源
+      3. 代码优化 - 性能优化、重构建议
+      4. 技术选型 - 根据场景推荐合适的技术方案
+      
+      规则：
+      - 优先使用 file_read 查看相关代码
+      - 使用 shell 执行测试或检查命令
+      - 代码块使用合适的语法高亮
+      - 解释复杂逻辑时添加详细注释
+    tools:
+      - shell
+      - file_read
+      - file_write
+      - web_search
+      - memory
+    skills:
+      - shell
+      - file
+    route:
+      priority: 10
+      patterns:
+        - 写代码
+        - 编程
+        - 代码
+        - 程序
+        - bug
+        - debug
+        - 调试
+        - 报错
+        - 错误
+        - 异常
+        - 优化
+        - 重构
+        - 审查
+        - review
+        - "\\.js$"
+        - "\\.ts$"
+        - "\\.py$"
+        - "\\.java$"
+        - "\\.go$"
+        - "\\.rs$"
+        - function\\s+\\w+
+        - class\\s+\\w+
+        - import\\s+\\w+
+        - const\\s+\\w+
+        - let\\s+\\w+
+
+  # ============================================
+  # 文档助手
+  # ============================================
+  doc:
+    name: 文档助手
+    description: 处理文档编辑、总结、飞书文档、会议纪要
+    model: glm-5.1  # 使用 GLM-5.1，文档处理能力更强
+    temperature: 0.5
+    system_prompt: |
+      你是专业的文档处理助手，擅长文档编辑、内容总结和知识管理。
+      
+      你的专长：
+      1. 文档总结 - 提炼关键信息，生成摘要
+      2. 会议纪要 - 整理会议记录，提取待办事项
+      3. 飞书文档 - 读取、编辑飞书云文档
+      4. 内容改写 - 润色文字、调整语气、格式转换
+      
+      规则：
+      - 处理飞书文档时先确认文档权限
+      - 总结内容要结构化、条理清晰
+      - 保留重要细节，去除冗余信息
+    tools:
+      - file_read
+      - file_write
+      - web_search
+      - memory
+    skills:
+      - feishu-doc
+      - file
+    route:
+      priority: 8
+      patterns:
+        - 文档
+        - 总结
+        - 摘要
+        - 纪要
+        - 会议
+        - 飞书
+        - 撰写
+        - 编辑
+        - 润色
+        - 改写
+        - 格式
+        - markdown
+        - doc
+        - pdf
+        - 报告
+        - 文案
+
+  # ============================================
+  # 运维助手
+  # ============================================
+  ops:
+    name: 运维助手
+    description: 服务器运维、系统管理、Docker/K8s 操作
+    model: ${MODEL_NAME:-glm-5}
+    temperature: 0.2
+    system_prompt: |
+      你是专业的运维助手，精通 Linux 系统管理、容器化和云服务。
+      
+      你的专长：
+      1. 系统管理 - Linux 命令、服务管理、日志分析
+      2. 容器化 - Docker、Kubernetes 操作
+      3. 网络诊断 - 网络问题排查、防火墙配置
+      4. 监控告警 - 系统监控、性能分析
+      
+      规则：
+      - 危险操作（rm -rf 等）必须二次确认
+      - 优先使用非破坏性命令查看状态
+      - 重要操作前建议备份
+      - 提供命令的详细解释
+    tools:
+      - shell
+      - file_read
+      - http_request
+      - memory
+    skills:
+      - shell
+    route:
+      priority: 9
+      patterns:
+        - 服务器
+        - 运维
+        - docker
+        - kubernetes
+        - k8s
+        - linux
+        - nginx
+        - 部署
+        - 日志
+        - 监控
+        - 重启
+        - 服务
+        - 进程
+        - 端口
+        - 磁盘
+        - 内存
+        - cpu
+
+  # ============================================
+  # 研究助手
+  # ============================================
+  research:
+    name: 研究助手
+    description: 深度研究、信息搜集、竞品分析、资料整理
+    model: glm-5.1  # 使用 GLM-5.1，推理能力更强
+    temperature: 0.7
+    system_prompt: |
+      你是专业的研究助手，擅长信息搜集、深度分析和知识整理。
+      
+      你的专长：
+      1. 网络搜索 - 搜集最新信息和资料
+      2. 竞品分析 - 对比分析、优劣势评估
+      3. 资料整理 - 结构化整理零散信息
+      4. 趋势研究 - 行业动态、技术趋势
+      
+      规则：
+      - 搜索结果需要交叉验证
+      - 引用来源，标注信息时效性
+      - 分步骤展示研究过程
+      - 结论要基于证据
+    tools:
+      - web_search
+      - http_request
+      - file_read
+      - file_write
+      - memory
+    skills:
+      - web
+      - file
+    route:
+      priority: 7
+      patterns:
+        - 搜索
+        - 研究
+        - 调研
+        - 资料
+        - 竞品
+        - 对比
+        - 分析
+        - 趋势
+        - 行业
+        - 市场
+        - 查一下
+        - 找一下
+        - 最新
+        - 新闻

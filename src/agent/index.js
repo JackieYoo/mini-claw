@@ -7,16 +7,17 @@ import OpenAI from 'openai';
 import { createLogger } from '../utils/logger.js';
 import { createSessionManager } from '../utils/session.js';
 import { retryApi } from '../utils/retry.js';
+import { ConfigError, ModelError, ToolExecutionError } from '../utils/errors.js';
 
 const logger = createLogger('agent');
 
 export function createAgent(config, toolRegistry) {
   // 验证配置
   if (!config.api_key) {
-    throw new Error('API Key 未配置，请检查 .env 文件中的 MODEL_API_KEY');
+    throw new ConfigError('API Key 未配置，请检查 .env 文件中的 MODEL_API_KEY');
   }
   if (!config.model) {
-    throw new Error('模型名称未配置，请检查 .env 文件中的 MODEL_NAME');
+    throw new ConfigError('模型名称未配置，请检查 .env 文件中的 MODEL_NAME');
   }
   
   const client = new OpenAI({
@@ -64,7 +65,7 @@ export function createAgent(config, toolRegistry) {
   }
   
 
-  // 验证并修复消息格式（统一的单次验证）
+  // 验证并修复消息格式（深拷贝，不修改原始数据）
   function validateMessages(messages) {
     if (!messages || messages.length === 0) {
       logger.error('消息数组为空！');
@@ -75,17 +76,20 @@ export function createAgent(config, toolRegistry) {
     const warnings = [];
 
     for (let i = 0; i < messages.length; i++) {
-      const msg = messages[i];
+      const raw = messages[i];
 
       // 检查必需字段
-      if (!msg.role) {
+      if (!raw.role) {
         warnings.push(`消息 ${i} 缺少 role 字段，跳过`);
         continue;
       }
 
+      // 深拷贝避免修改原始消息
+      const msg = { ...raw };
+      if (raw.tool_calls) msg.tool_calls = raw.tool_calls.map(tc => ({ ...tc, function: { ...tc.function } }));
+
       // 处理不同类型的消息（修复而非跳过）
       if (msg.role === 'tool') {
-        // tool 消息必须有 tool_call_id，如果没有则生成一个
         if (!msg.tool_call_id) {
           warnings.push(`消息 ${i} 是 tool 角色但缺少 tool_call_id，生成默认值`);
           msg.tool_call_id = `fallback_${Date.now()}_${i}`;
@@ -94,13 +98,11 @@ export function createAgent(config, toolRegistry) {
           msg.content = '';
         }
       } else if (msg.role === 'assistant') {
-        // assistant 消息可以有 content 或 tool_calls
         if (!msg.content && (!msg.tool_calls || msg.tool_calls.length === 0)) {
           warnings.push(`消息 ${i} 是 assistant 角色但没有 content 或 tool_calls，设置默认内容`);
           msg.content = '(无内容)';
         }
       } else if (msg.role === 'user' || msg.role === 'system') {
-        // user 和 system 消息必须有 content
         if (msg.content === undefined || msg.content === null) {
           warnings.push(`消息 ${i} 是 ${msg.role} 角色但 content 为空，设置默认内容`);
           msg.content = '(空消息)';
@@ -174,7 +176,7 @@ export function createAgent(config, toolRegistry) {
       const validation = validateMessages(session.messages);
 
       if (validation.messages.length === 0) {
-        throw new Error('消息验证失败：没有有效的消息');
+        throw new ModelError('消息验证失败：没有有效的消息');
       }
 
       // 调试日志
@@ -212,9 +214,25 @@ export function createAgent(config, toolRegistry) {
       const startTime = Date.now();
 
       // 使用重试机制调用 API
-      let response = await retryApi(() => client.chat.completions.create(requestParams), {
-        maxRetries: 3,
-        initialDelay: 2000,
+      // glm-5.1 等推理模型需要更大 max_tokens，推理 token 包含在内
+      const isReasoningModel = config.model?.includes('glm-5') ||
+                               config.model?.includes('o1') ||
+                               config.model?.includes('o3') ||
+                               config.model?.includes('deepseek-r1');
+      const effectiveMaxTokens = isReasoningModel
+        ? Math.max(config.max_tokens || 4096, 8192)
+        : (config.max_tokens || 4096);
+
+      // 推理模型不支持自定义 temperature
+      const effectiveTemperature = isReasoningModel ? undefined : (config.temperature || 0.7);
+
+      let response = await retryApi(() => client.chat.completions.create({
+        ...requestParams,
+        max_tokens: effectiveMaxTokens,
+        ...(effectiveTemperature !== undefined && { temperature: effectiveTemperature }),
+      }), {
+        maxRetries: 2,
+        initialDelay: 1000,
       });
       let assistantMessage = response.choices[0].message;
       
@@ -276,16 +294,18 @@ export function createAgent(config, toolRegistry) {
         const updatedValidation = validateMessages(updatedSession.messages);
 
         if (updatedValidation.messages.length === 0) {
-          throw new Error('更新后的消息验证失败');
+          throw new ModelError('更新后的消息验证失败');
         }
 
         // 使用重试机制调用 API
         response = await retryApi(() => client.chat.completions.create({
           ...requestParams,
           messages: updatedValidation.messages,
+          max_tokens: effectiveMaxTokens,
+          ...(effectiveTemperature !== undefined && { temperature: effectiveTemperature }),
         }), {
-          maxRetries: 3,
-          initialDelay: 2000,
+          maxRetries: 2,
+          initialDelay: 1000,
         });
         
         assistantMessage = response.choices[0].message;
@@ -328,7 +348,7 @@ export function createAgent(config, toolRegistry) {
       
       // 根据错误类型返回友好提示
       let errorMessage = '处理请求时出错';
-      
+
       if (err.status === 401 || err.code === 'invalid_api_key') {
         errorMessage = 'API Key 无效，请检查配置';
       } else if (err.status === 404) {
@@ -337,13 +357,16 @@ export function createAgent(config, toolRegistry) {
         errorMessage = '请求过于频繁，请稍后重试';
       } else if (err.status === 500 || err.status === 502 || err.status === 503) {
         errorMessage = '模型服务暂时不可用，请稍后重试';
-      } else if (err.message?.includes('timeout')) {
+      } else if (err.message?.includes('timeout') || err.name === 'AbortError') {
         errorMessage = '请求超时，请稍后重试';
       } else if (err.message) {
         errorMessage = `处理失败: ${err.message.substring(0, 100)}`;
       }
-      
-      throw new Error(errorMessage);
+
+      throw new ModelError(errorMessage, config.base_url, {
+        status: err.status,
+        code: err.code,
+      });
     }
   }
   
@@ -413,5 +436,13 @@ export function createAgent(config, toolRegistry) {
     getStats,
     sessionManager,
     client,
+    // 暴露配置供外部使用
+    config: {
+      model: config.model,
+      base_url: config.base_url,
+      api_key: config.api_key ? '***' : undefined, // 脱敏
+      temperature: config.temperature,
+      max_tokens: config.max_tokens,
+    },
   };
 }

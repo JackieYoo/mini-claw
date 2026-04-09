@@ -1,13 +1,18 @@
 /**
- * Logger - Structured logging with pino
+ * Logger - Structured logging with pino (with instance caching)
  */
 
 import pino from 'pino';
 
 const isDev = process.env.NODE_ENV !== 'production';
+const loggerCache = new Map();
 
 export function createLogger(name) {
-  return pino({
+  if (loggerCache.has(name)) {
+    return loggerCache.get(name);
+  }
+
+  const logger = pino({
     name,
     level: process.env.LOG_LEVEL || 'info',
     transport: isDev ? {
@@ -19,4 +24,7 @@ export function createLogger(name) {
       }
     } : undefined
   });
+
+  loggerCache.set(name, logger);
+  return logger;
 }

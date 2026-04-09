@@ -2,6 +2,8 @@
  * Security Utilities - 安全工具函数
  */
 
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync, timingSafeEqual as _tse } from 'crypto';
+import { accessSync, constants } from 'fs';
 import { createLogger } from './logger.js';
 
 const logger = createLogger('security');
@@ -55,13 +57,11 @@ export function safeErrorMessage(error, defaultMessage = '操作失败') {
  * 验证文件权限
  */
 export function checkFilePermission(filePath, mode = 'read') {
-  const fs = require('fs');
-  
   try {
     if (mode === 'read') {
-      fs.accessSync(filePath, fs.constants.R_OK);
+      accessSync(filePath, constants.R_OK);
     } else if (mode === 'write') {
-      fs.accessSync(filePath, fs.constants.W_OK);
+      accessSync(filePath, constants.W_OK);
     }
     return { allowed: true };
   } catch (err) {
@@ -109,25 +109,38 @@ export function sanitizeForLog(input) {
     .replace(/\r/g, '\\r');
 }
 
+const AES_ALGO = 'aes-256-gcm';
+const KEY_LENGTH = 32;
+const IV_LENGTH = 16;
+const AUTH_TAG_LENGTH = 16;
+
 /**
- * 会话数据加密（简单实现，生产环境应使用更安全的方案）
+ * 从 secret 派生加密密钥
+ */
+function deriveKey(secret) {
+  return scryptSync(secret, 'miniclaw-session-salt', KEY_LENGTH);
+}
+
+/**
+ * 会话数据加密（AES-256-GCM）
  */
 export function encryptSessionData(data, secret) {
+  const payload = JSON.stringify(data);
+
   if (!secret) {
     logger.warn('未配置加密密钥，会话数据将以明文存储');
-    return JSON.stringify(data);
+    return payload;
   }
-  
-  // 简单的 XOR 加密（生产环境应使用 crypto 模块）
-  const str = JSON.stringify(data);
-  const key = secret.padEnd(32, '0').substring(0, 32);
-  let encrypted = '';
-  
-  for (let i = 0; i < str.length; i++) {
-    encrypted += String.fromCharCode(str.charCodeAt(i) ^ key.charCodeAt(i % key.length));
-  }
-  
-  return Buffer.from(encrypted).toString('base64');
+
+  const key = deriveKey(secret);
+  const iv = randomBytes(IV_LENGTH);
+  const cipher = createCipheriv(AES_ALGO, key, iv);
+
+  const encrypted = Buffer.concat([cipher.update(payload, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+
+  // 格式: iv(16) + authTag(16) + ciphertext
+  return Buffer.concat([iv, authTag, encrypted]).toString('base64');
 }
 
 /**
@@ -135,21 +148,28 @@ export function encryptSessionData(data, secret) {
  */
 export function decryptSessionData(encrypted, secret) {
   if (!secret) {
-    return JSON.parse(encrypted);
-  }
-  
-  try {
-    const key = secret.padEnd(32, '0').substring(0, 32);
-    const str = Buffer.from(encrypted, 'base64').toString();
-    let decrypted = '';
-    
-    for (let i = 0; i < str.length; i++) {
-      decrypted += String.fromCharCode(str.charCodeAt(i) ^ key.charCodeAt(i % key.length));
+    try {
+      return JSON.parse(encrypted);
+    } catch {
+      return null;
     }
-    
-    return JSON.parse(decrypted);
+  }
+
+  try {
+    const raw = Buffer.from(encrypted, 'base64');
+
+    const iv = raw.subarray(0, IV_LENGTH);
+    const authTag = raw.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH);
+    const ciphertext = raw.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
+
+    const key = deriveKey(secret);
+    const decipher = createDecipheriv(AES_ALGO, key, iv);
+    decipher.setAuthTag(authTag);
+
+    const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    return JSON.parse(decrypted.toString('utf8'));
   } catch (err) {
-    logger.error('解密会话数据失败:', err);
+    logger.error('解密会话数据失败:', err.message);
     return null;
   }
 }

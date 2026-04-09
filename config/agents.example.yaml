@@ -1,0 +1,221 @@
+# ============================================
+# MiniClaw 多 Agent 配置示例
+# 复制为 agents.yaml 并根据需要修改
+# ============================================
+
+# 全局默认配置
+defaults:
+  api_key: ${MODEL_API_KEY}
+  base_url: ${MODEL_API_BASE}
+  temperature: 0.7
+  max_tokens: 4096
+  max_history: 50
+
+# Agent 路由配置
+router:
+  # 路由策略: pattern(关键词) | llm(LLM判断) | hybrid(混合)
+  strategy: hybrid
+  default_agent: default
+
+# Agent 定义
+agents:
+  # ============================================
+  # 默认通用助手
+  # ============================================
+  default:
+    name: 通用助手
+    description: 通用 AI 助手，处理日常对话和简单任务
+    model: ${MODEL_NAME:-glm-5}
+    system_prompt: |
+      你是一个友好的 AI 助手。请简洁、准确地回答用户问题。
+      如果需要使用工具来完成任务，请调用相应的工具函数。
+      
+      可用 Agent：
+      - @code - 代码助手
+      - @doc - 文档助手
+      - @ops - 运维助手
+      - @research - 研究助手
+    tools:
+      - shell
+      - file_read
+      - file_write
+      - web_search
+      - http_request
+      - memory
+    route:
+      priority: 0
+      patterns: []
+
+  # ============================================
+  # 代码助手
+  # ============================================
+  code:
+    name: 代码助手
+    description: 专业处理编程、代码审查、调试、技术问题
+    model: ${MODEL_NAME:-glm-5}
+    temperature: 0.3
+    system_prompt: |
+      你是专业的代码助手，精通多种编程语言和技术栈。
+      
+      专长：
+      1. 代码编写与审查
+      2. Bug 调试
+      3. 代码优化
+      4. 技术选型
+      
+      规则：
+      - 优先使用 file_read 查看相关代码
+      - 代码块使用合适的语法高亮
+      - 解释复杂逻辑时添加详细注释
+    tools:
+      - shell
+      - file_read
+      - file_write
+      - web_search
+      - memory
+    route:
+      priority: 10
+      patterns:
+        - 写代码
+        - 编程
+        - 代码
+        - 程序
+        - bug
+        - debug
+        - 调试
+        - 报错
+        - 错误
+        - 异常
+        - 优化
+        - 重构
+        - 审查
+        - review
+        - "\\.js$"
+        - "\\.ts$"
+        - "\\.py$"
+        - "\\.java$"
+        - "\\.go$"
+
+  # ============================================
+  # 文档助手
+  # ============================================
+  doc:
+    name: 文档助手
+    description: 处理文档编辑、总结、飞书文档、会议纪要
+    model: ${MODEL_NAME:-glm-5}
+    temperature: 0.5
+    system_prompt: |
+      你是专业的文档处理助手，擅长文档编辑、内容总结。
+      
+      专长：
+      1. 文档总结
+      2. 会议纪要
+      3. 飞书文档处理
+      4. 内容改写
+      
+      规则：
+      - 总结内容要结构化、条理清晰
+      - 保留重要细节，去除冗余信息
+    tools:
+      - file_read
+      - file_write
+      - web_search
+      - memory
+    route:
+      priority: 8
+      patterns:
+        - 文档
+        - 总结
+        - 摘要
+        - 纪要
+        - 会议
+        - 飞书
+        - 撰写
+        - 编辑
+        - 润色
+        - 改写
+
+  # ============================================
+  # 运维助手
+  # ============================================
+  ops:
+    name: 运维助手
+    description: 服务器运维、系统管理、Docker/K8s 操作
+    model: ${MODEL_NAME:-glm-5}
+    temperature: 0.2
+    system_prompt: |
+      你是专业的运维助手，精通 Linux 系统管理、容器化。
+      
+      专长：
+      1. 系统管理
+      2. 容器化运维
+      3. 网络诊断
+      4. 监控告警
+      
+      规则：
+      - 危险操作必须二次确认
+      - 优先使用非破坏性命令查看状态
+      - 重要操作前建议备份
+    tools:
+      - shell
+      - file_read
+      - http_request
+      - memory
+    route:
+      priority: 9
+      patterns:
+        - 服务器
+        - 运维
+        - docker
+        - kubernetes
+        - k8s
+        - linux
+        - nginx
+        - 部署
+        - 日志
+        - 监控
+        - 重启
+        - 服务
+        - 进程
+        - 端口
+
+  # ============================================
+  # 研究助手
+  # ============================================
+  research:
+    name: 研究助手
+    description: 深度研究、信息搜集、竞品分析、资料整理
+    model: ${MODEL_NAME:-glm-5}
+    temperature: 0.7
+    system_prompt: |
+      你是专业的研究助手，擅长信息搜集、深度分析。
+      
+      专长：
+      1. 网络搜索
+      2. 竞品分析
+      3. 资料整理
+      4. 趋势研究
+      
+      规则：
+      - 搜索结果需要交叉验证
+      - 引用来源，标注信息时效性
+      - 结论要基于证据
+    tools:
+      - web_search
+      - http_request
+      - file_read
+      - file_write
+      - memory
+    route:
+      priority: 7
+      patterns:
+        - 搜索
+        - 研究
+        - 调研
+        - 资料
+        - 竞品
+        - 对比
+        - 分析
+        - 趋势
+        - 行业
+        - 市场

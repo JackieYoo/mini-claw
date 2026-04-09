@@ -4,7 +4,7 @@
  */
 
 import { createLogger } from '../utils/logger.js';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from 'fs';
+import { existsSync, mkdirSync, readFile, writeFile, chmod } from 'fs';
 import { join } from 'path';
 import { encryptSessionData, decryptSessionData } from './security.js';
 
@@ -43,7 +43,7 @@ export function createSessionManager(options = {}) {
     }
     sessionFile = join(persistDir, 'sessions.json');
 
-    // 加载持久化的会话
+    // 异步加载持久化的会话（启动后自动完成）
     loadFromDisk();
 
     // 定期持久化
@@ -64,21 +64,21 @@ export function createSessionManager(options = {}) {
   /**
    * 从磁盘加载会话
    */
-  function loadFromDisk() {
+  async function loadFromDisk() {
     if (!sessionFile || !existsSync(sessionFile)) return;
-    
+
     try {
-      const encrypted = readFileSync(sessionFile, 'utf-8');
+      const encrypted = await readFile(sessionFile, 'utf-8');
       const encryptionSecret = process.env.SESSION_ENCRYPTION_KEY;
-      
+
       const data = decryptSessionData(encrypted, encryptionSecret);
       if (!data) {
         logger.warn('会话数据解密失败，将使用空会话');
         return;
       }
-      
+
       let loaded = 0;
-      
+
       for (const [key, session] of Object.entries(data)) {
         // 过滤过期会话
         if (Date.now() - session.updatedAt < pruneAfterMs) {
@@ -86,7 +86,7 @@ export function createSessionManager(options = {}) {
           loaded++;
         }
       }
-      
+
       logger.info(`从磁盘加载 ${loaded} 个会话`);
     } catch (err) {
       logger.warn('加载会话失败:', err.message);
@@ -118,50 +118,97 @@ export function createSessionManager(options = {}) {
   }
 
   /**
-   * 保存到磁盘（加密）
+   * 保存到磁盘（加密，异步）
    */
   function saveToDisk() {
     if (!sessionFile) return;
 
+    const data = Object.fromEntries(sessions);
+    const encryptionSecret = process.env.SESSION_ENCRYPTION_KEY;
+    let encrypted;
     try {
-      const data = Object.fromEntries(sessions);
-      const encryptionSecret = process.env.SESSION_ENCRYPTION_KEY;
-      const encrypted = encryptSessionData(data, encryptionSecret);
-
-      writeFileSync(sessionFile, encrypted, { mode: 0o600 }); // 仅所有者可读写
-
-      logger.debug(`会话已持久化: ${sessions.size} 个`);
+      encrypted = encryptSessionData(data, encryptionSecret);
     } catch (err) {
-      logger.warn('持久化会话失败:', err.message);
+      logger.warn('加密会话数据失败:', err.message);
+      return;
     }
+
+    writeFile(sessionFile, encrypted, { mode: 0o600 }, (err) => {
+      if (err) {
+        logger.warn('持久化会话失败:', err.message);
+      } else {
+        logger.debug(`会话已持久化: ${sessions.size} 个`);
+      }
+    });
+  }
+  
+  // 清理特殊字符，确保 key 安全
+  function sanitizeKeyPart(str) {
+    if (!str) return 'unknown';
+    return str.toString()
+      .replace(/[:/\s\x00-\x1f\x7f]/g, '_')  // 替换控制字符和分隔符
+      .replace(/[^\x20-\x7e\u4e00-\u9fa5]/g, '')  // 只保留可打印字符和中文
+      .slice(0, 64);  // 限制长度
+  }
+
+  /**
+   * 生成会话 Key
+   * 多 Agent 格式: <agentId>:<channel>:<type>:<id>
+   * 旧格式兼容: <channel>:<type>:<id>
+   */
+  function generateSessionKey({ agentId, channel, chatType, chatId, senderId }) {
+    // 构建基础 key（不含 agentId），并对各部分进行清理
+    let baseKey;
+
+    const safeChannel = sanitizeKeyPart(channel);
+    const safeChatId = sanitizeKeyPart(chatId);
+    const safeSenderId = sanitizeKeyPart(senderId);
+
+    if (chatType === 'group' || chatType === 'channel') {
+      baseKey = `${safeChannel}:group:${safeChatId}`;
+    } else {
+      switch (dmScope) {
+        case 'main':
+          baseKey = 'main';
+          break;
+        case 'per-peer':
+          baseKey = `${safeChannel}:dm:${safeSenderId}`;
+          break;
+        case 'per-channel-peer':
+        default:
+          baseKey = `${safeChannel}:dm:${safeChatId}`;
+          break;
+      }
+    }
+
+    // 添加 agentId 前缀实现隔离
+    const prefix = sanitizeKeyPart(agentId || 'default');
+    return `${prefix}:${baseKey}`;
   }
   
   /**
-   * 生成会话 Key
-   * OpenClaw 格式: agent:<agentId>:<channel>:<type>:<id>
+   * 解析会话 Key，提取 agentId 和基础 key
    */
-  function generateSessionKey({ channel, chatType, chatId, senderId }) {
-    if (chatType === 'group' || chatType === 'channel') {
-      return `${channel}:group:${chatId}`;
+  function parseSessionKey(sessionKey) {
+    if (!sessionKey) return { agentId: 'default', baseKey: '', fullKey: '' };
+    
+    const parts = sessionKey.split(':');
+    
+    // 新格式: agentId:channel:type:id (4+ 部分)
+    if (parts.length >= 4) {
+      const agentId = parts[0];
+      const baseKey = parts.slice(1).join(':');
+      return { agentId, baseKey, fullKey: sessionKey };
     }
     
-    switch (dmScope) {
-      case 'main':
-        return 'main';
-      case 'per-peer':
-        return `${channel}:dm:${senderId}`;
-      case 'per-channel-peer':
-      default:
-        return `${channel}:dm:${chatId}`;
-    }
+    // 旧格式兼容: 无前缀，直接返回
+    return { agentId: 'default', baseKey: sessionKey, fullKey: sessionKey };
   }
   
   /**
    * 获取或创建会话
    */
   function getSession(sessionKey, systemPrompt) {
-    maybePruneSessions();
-    
     if (!sessions.has(sessionKey)) {
       sessions.set(sessionKey, {
         id: `session_${Date.now()}_${Math.random().toString(36).slice(2)}`,
@@ -362,8 +409,75 @@ export function createSessionManager(options = {}) {
     }
   }
   
+  /**
+   * 按 Agent 获取会话统计
+   */
+  function getStatsByAgent() {
+    const stats = {};
+    
+    for (const [key, session] of sessions) {
+      const { agentId } = parseSessionKey(key);
+      if (!stats[agentId]) {
+        stats[agentId] = {
+          sessionCount: 0,
+          messageCount: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+        };
+      }
+      stats[agentId].sessionCount++;
+      stats[agentId].messageCount += session.messages?.length || 0;
+      stats[agentId].inputTokens += session.tokenCount?.input || 0;
+      stats[agentId].outputTokens += session.tokenCount?.output || 0;
+    }
+    
+    return stats;
+  }
+  
+  /**
+   * 获取指定 Agent 的会话列表
+   */
+  function listSessionsByAgent(agentId, limit = 20) {
+    return Array.from(sessions.entries())
+      .filter(([key]) => {
+        const parsed = parseSessionKey(key);
+        return parsed.agentId === agentId;
+      })
+      .sort((a, b) => b[1].updatedAt - a[1].updatedAt)
+      .slice(0, limit)
+      .map(([key, session]) => ({
+        key,
+        baseKey: parseSessionKey(key).baseKey,
+        id: session.id,
+        messageCount: session.messageCount,
+        tokenCount: session.tokenCount,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+      }));
+  }
+  
+  /**
+   * 删除指定 Agent 的所有会话
+   */
+  function deleteSessionsByAgent(agentId) {
+    let deleted = 0;
+    for (const [key] of sessions) {
+      const { agentId: keyAgentId } = parseSessionKey(key);
+      if (keyAgentId === agentId) {
+        sessions.delete(key);
+        deleted++;
+      }
+    }
+    if (deleted > 0) {
+      logger.info(`已删除 Agent ${agentId} 的 ${deleted} 个会话`);
+      triggerSave(true);
+    }
+    return deleted;
+  }
+  
   return {
     generateSessionKey,
+    parseSessionKey,
     getSession,
     addMessage,
     updateTokenCount,
@@ -371,6 +485,9 @@ export function createSessionManager(options = {}) {
     deleteSession,
     listSessions,
     getStats,
+    getStatsByAgent,
+    listSessionsByAgent,
+    deleteSessionsByAgent,
     saveToDisk,
     close,
   };

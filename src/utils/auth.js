@@ -10,6 +10,20 @@ import { createLogger } from './logger.js';
 const logger = createLogger('auth');
 
 /**
+ * Constant-time string comparison to prevent timing attacks
+ */
+function safeEqual(a, b) {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) {
+    // Lengths differ — still do a compare to keep constant time
+    crypto.timingSafeEqual(bufA, bufA);
+    return false;
+  }
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+/**
  * 创建 API Key 认证中间件
  */
 export function createApiKeyAuth(options = {}) {
@@ -36,8 +50,9 @@ export function createApiKeyAuth(options = {}) {
       return;
     }
 
-    // 验证 API key
-    if (!apiKeys.includes(apiKey)) {
+    // 验证 API key (constant-time comparison)
+    const valid = apiKeys.some(k => safeEqual(apiKey, k));
+    if (!valid) {
       logger.warn(`无效的 API Key: ${apiKey.substring(0, 8)}...`);
       reply.status(401).send({
         error: 'Unauthorized',

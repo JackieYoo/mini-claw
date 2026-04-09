@@ -11,6 +11,8 @@
     "test:watch": "vitest --watch",
     "test:coverage": "vitest --coverage",
     "test:ui": "vitest --ui",
+    "test:agents": "node scripts/test-multi-agent.js",
+    "diagnose": "node scripts/diagnose.js",
     "chat": "node -e \"const c = require('openai'); console.log('Test OpenAI client')\""
   },
   "dependencies": {

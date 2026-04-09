@@ -13,6 +13,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { parse } from 'yaml';
 import { createLogger } from './logger.js';
+import { maskSensitiveData } from './mask.js';
 
 const logger = createLogger('config');
 
@@ -66,7 +67,7 @@ function substituteEnvVars(value) {
  */
 const validationRules = {
   gateway: {
-    port: { type: 'number', min: 1, max: 65535, required: true },
+    port: { type: 'number', min: 1024, max: 65535, required: true },
     host: { type: 'string', required: false, default: '0.0.0.0' },
   },
   model: {
@@ -172,7 +173,7 @@ function validateConfig(config, rules, path = '') {
  * 加载配置文件
  */
 export async function loadConfig() {
-  // 查找配置文件
+  // 查找主配置文件
   const configPaths = [
     join(process.cwd(), 'config', 'config.yaml'),
     join(process.cwd(), 'config.yaml'),
@@ -219,9 +220,31 @@ export async function loadConfig() {
     config.env = process.env.NODE_ENV || 'development';
     config.isProduction = config.env === 'production';
     config.isDevelopment = config.env === 'development';
-    
+
+    // 环境变量覆盖配置（优先级最高）
+    if (process.env.PORT) {
+      const portNum = parseInt(process.env.PORT, 10);
+      if (!isNaN(portNum) && portNum >= 1024 && portNum <= 65535) {
+        config.gateway.port = portNum;
+        logger.info(`端口被环境变量覆盖: ${portNum}`);
+      } else {
+        logger.warn(`环境变量 PORT 无效: ${process.env.PORT}，使用配置值`);
+      }
+    }
+
+    if (process.env.HOST) {
+      config.gateway.host = process.env.HOST;
+      logger.info(`主机被环境变量覆盖: ${process.env.HOST}`);
+    }
+
+    // 尝试加载多 Agent 配置
+    const agentsConfig = await loadAgentsConfig();
+    if (agentsConfig) {
+      config.agents = agentsConfig;
+    }
+
     logger.info('配置加载成功');
-    
+
     return config;
     
   } catch (err) {
@@ -231,26 +254,55 @@ export async function loadConfig() {
 }
 
 /**
+ * 加载多 Agent 配置
+ */
+export async function loadAgentsConfig() {
+  const agentsConfigPaths = [
+    join(process.cwd(), 'config', 'agents.yaml'),
+    join(process.cwd(), 'agents.yaml'),
+    join(__dirname, '../../config/agents.yaml'),
+  ];
+  
+  let configPath = null;
+  for (const path of agentsConfigPaths) {
+    if (existsSync(path)) {
+      configPath = path;
+      break;
+    }
+  }
+  
+  if (!configPath) {
+    logger.debug('多 Agent 配置文件未找到，使用单 Agent 模式');
+    return null;
+  }
+  
+  logger.info(`加载多 Agent 配置: ${configPath}`);
+  
+  try {
+    const content = readFileSync(configPath, 'utf-8');
+    let config = parse(content);
+    
+    // 替换环境变量
+    config = substituteEnvVars(config);
+    
+    // 验证必要的配置项
+    if (!config.agents || Object.keys(config.agents).length === 0) {
+      logger.warn('多 Agent 配置中没有定义任何 Agent');
+      return null;
+    }
+    
+    logger.info(`已加载 ${Object.keys(config.agents).length} 个 Agent 配置`);
+    return config;
+    
+  } catch (err) {
+    logger.warn('加载多 Agent 配置失败:', err.message);
+    return null;
+  }
+}
+
+/**
  * 创建配置快照（脱敏）
  */
 export function createConfigSnapshot(config) {
-  const snapshot = JSON.parse(JSON.stringify(config));
-  
-  // 脱敏敏感信息
-  const sensitiveKeys = ['api_key', 'app_secret', 'secret', 'password', 'token'];
-  
-  const maskSensitive = (obj) => {
-    if (typeof obj !== 'object' || obj === null) return;
-    
-    for (const key of Object.keys(obj)) {
-      if (sensitiveKeys.some(sk => key.toLowerCase().includes(sk))) {
-        obj[key] = '***';
-      } else if (typeof obj[key] === 'object') {
-        maskSensitive(obj[key]);
-      }
-    }
-  };
-  
-  maskSensitive(snapshot);
-  return snapshot;
+  return maskSensitiveData(config);
 }
