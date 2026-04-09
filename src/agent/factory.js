@@ -6,6 +6,7 @@
 import { createAgent } from './index.js';
 import { createLogger } from '../utils/logger.js';
 import { createRouter } from './router.js';
+import { ConfigError, NotFoundError, SessionError } from '../utils/errors.js';
 
 const logger = createLogger('agent-factory');
 
@@ -74,10 +75,10 @@ export function createAgentFactory(config, toolRegistry) {
       
       // 验证必要配置
       if (!mergedConfig.api_key) {
-        throw new Error(`Agent ${id}: API Key 未配置`);
+        throw new ConfigError(`Agent ${id}: API Key 未配置`);
       }
       if (!mergedConfig.model) {
-        throw new Error(`Agent ${id}: 模型名称未配置`);
+        throw new ConfigError(`Agent ${id}: 模型名称未配置`);
       }
       
       // 过滤工具
@@ -117,7 +118,7 @@ export function createAgentFactory(config, toolRegistry) {
   }
   
   if (agents.size === 0) {
-    throw new Error('没有成功创建任何 Agent，请检查配置');
+    throw new ConfigError('没有成功创建任何 Agent，请检查配置');
   }
   
   logger.info(`Agent 工厂初始化完成，共 ${agents.size} 个 Agent`);
@@ -244,7 +245,7 @@ export function createAgentFactory(config, toolRegistry) {
    */
   function bindSession(sessionKey, agentId) {
     if (!agents.has(agentId)) {
-      throw new Error(`Agent ${agentId} 不存在`);
+      throw new NotFoundError(`Agent ${agentId}`);
     }
     sessionAgentMap.set(sessionKey, agentId);
     logger.debug(`会话 ${sessionKey} 绑定到 Agent ${agentId}`);
@@ -341,8 +342,8 @@ export function createAgentFactory(config, toolRegistry) {
     const fromAgent = agents.get(fromAgentId);
     const toAgent = agents.get(toAgentId);
     
-    if (!fromAgent) throw new Error(`源 Agent ${fromAgentId} 不存在`);
-    if (!toAgent) throw new Error(`目标 Agent ${toAgentId} 不存在`);
+    if (!fromAgent) throw new NotFoundError(`Agent ${fromAgentId}`);
+    if (!toAgent) throw new NotFoundError(`Agent ${toAgentId}`);
     
     logger.info(`Agent 协作: ${fromAgentId} -> ${toAgentId}`);
     

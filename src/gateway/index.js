@@ -9,6 +9,7 @@ import cors from '@fastify/cors';
 import { createLogger } from '../utils/logger.js';
 import { createAuth } from '../utils/auth.js';
 import { extractAgentMention, parseAgentCommand } from '../agent/router.js';
+import { metrics, metricHelpers } from '../utils/metrics.js';
 import net from 'net';
 
 const logger = createLogger('gateway');
@@ -61,6 +62,8 @@ async function findAvailablePort(startPort, host = '0.0.0.0', maxAttempts = 10) 
 export function createGateway(config, deps) {
   const { agentFactory, channelManager, toolRegistry, skillsLoader } = deps;
 
+  const corsOrigin = config.cors?.origin || '*';
+
   const fastify = Fastify({
     logger: false,
     // 增加请求体大小限制
@@ -68,7 +71,7 @@ export function createGateway(config, deps) {
   });
   fastify.register(websocket);
   fastify.register(cors, {
-    origin: '*',
+    origin: corsOrigin,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key'],
   });
@@ -92,6 +95,68 @@ export function createGateway(config, deps) {
 
   // 注册认证中间件
   fastify.addHook('preHandler', authMiddleware);
+
+  // 输入验证中间件
+  fastify.addHook('preHandler', async (request, reply) => {
+    // 只验证 POST/PUT 请求
+    if (request.method !== 'POST' && request.method !== 'PUT') {
+      return;
+    }
+
+    // 验证 Content-Type
+    const contentType = request.headers['content-type'];
+    if (!contentType || !contentType.includes('application/json')) {
+      // 允许 form-data 等其他类型，不做强制限制
+      return;
+    }
+
+    // 验证请求体大小
+    const contentLength = parseInt(request.headers['content-length'], 10);
+    const maxSize = 10 * 1024 * 1024; // 10MB
+
+    if (contentLength && contentLength > maxSize) {
+      return reply.status(413).send({
+        error: 'Payload Too Large',
+        message: `请求体大小超过限制: ${maxSize} bytes`,
+        maxSize
+      });
+    }
+
+    // 验证请求体中的敏感字段类型
+    if (request.body && typeof request.body === 'object') {
+      validateRequestBody(request.body, reply);
+    }
+  });
+
+  // 请求体验证函数
+  function validateRequestBody(body, reply) {
+    // 检查是否包含非法的嵌套层级（防止原型链污染）
+    const maxDepth = 10;
+
+    function checkDepth(obj, depth = 0) {
+      if (depth > maxDepth) {
+        throw new Error('请求体嵌套层级过深');
+      }
+      if (obj && typeof obj === 'object') {
+        for (const key of Object.keys(obj)) {
+          // 检查危险键名（原型链污染）
+          if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+            throw new Error(`非法键名: ${key}`);
+          }
+          checkDepth(obj[key], depth + 1);
+        }
+      }
+    }
+
+    try {
+      checkDepth(body);
+    } catch (err) {
+      return reply.status(400).send({
+        error: 'Invalid Request Body',
+        message: err.message
+      });
+    }
+  }
 
   // ==================== 全局错误处理 ====================
   fastify.setErrorHandler(async (error, request, reply) => {
@@ -205,12 +270,15 @@ export function createGateway(config, deps) {
   fastify.get('/stats', async () => {
     const agentStats = agentFactory?.getStats() || {};
     const sessionStats = {};
-    
+
     // 收集各 Agent 的会话统计
     for (const agent of agentFactory?.getAll() || []) {
       sessionStats[agent.metadata.id] = agent.sessionManager?.getStats?.() || {};
     }
-    
+
+    // 更新内存使用指标
+    metricHelpers.updateMemoryUsage();
+
     return {
       uptime: Math.floor((Date.now() - stats.startTime) / 1000),
       requests: stats.totalRequests,
@@ -221,7 +289,14 @@ export function createGateway(config, deps) {
       sessions: sessionStats,
       tools: toolRegistry?.getTools?.()?.length || 0,
       skills: skillsLoader?.getAll?.()?.length || 0,
+      metrics: metrics.exportJSON(),
     };
+  });
+
+  // ==================== Prometheus 指标端点 ====================
+  fastify.get('/metrics', async (request, reply) => {
+    reply.header('Content-Type', 'text/plain; charset=utf-8');
+    return metrics.exportPrometheus();
   });
   
   // ==================== Agent 管理 API ====================
@@ -380,31 +455,32 @@ export function createGateway(config, deps) {
   // 聊天接口 - 支持多 Agent
   fastify.post('/chat', async (request, reply) => {
     stats.totalRequests++;
-    
+
     // Rate limiting
     const clientIp = request.ip || 'unknown';
     const rateCheck = checkRateLimit(`ip:${clientIp}`, 30, 60000);
-    
+
     if (!rateCheck.allowed) {
       stats.rateLimitedRequests++;
-      return reply.status(429).send({ 
-        error: 'Too many requests', 
-        retryAfter: 60 
+      return reply.status(429).send({
+        error: 'Too many requests',
+        retryAfter: 60
       });
     }
-    
+
     const { message, sessionKey, context, agent: requestedAgentId } = request.body;
-    
+
     // 输入大小限制
     const maxMessageSize = 100000;
     if (message && message.length > maxMessageSize) {
       return reply.status(400).send({ error: 'Message too large' });
     }
-    
+
     if (!message) {
       return reply.status(400).send({ error: 'message is required' });
     }
-    
+
+    const startTime = Date.now();
     try {
       // 智能路由选择 Agent
       const agent = await agentFactory.select(message, {
@@ -412,21 +488,28 @@ export function createGateway(config, deps) {
         agentId: requestedAgentId,
         ...context,
       });
-      
+
       if (!agent) {
         return reply.status(404).send({ error: 'No available agent' });
       }
-      
+
       // 生成带 agentId 的会话 key
       const agentSessionKey = agent.sessionManager?.generateSessionKey?.({
         agentId: agent.metadata.id,
         ...(context || {}),
       }) || sessionKey;
-      
+
       const finalSessionKey = sessionKey || agentSessionKey;
-      
+
       const response = await agent.chat(message, finalSessionKey);
-      
+
+      // 记录指标
+      const duration = Date.now() - startTime;
+      metricHelpers.recordModelCall(agent.metadata.model, response.tokens?.input + response.tokens?.output || 0, duration);
+      if (response.toolCalls > 0) {
+        metricHelpers.recordToolExecution('agent_chat', duration, true);
+      }
+
       return {
         success: true,
         response: response.content,
@@ -440,6 +523,7 @@ export function createGateway(config, deps) {
       };
     } catch (err) {
       stats.totalErrors++;
+      metricHelpers.recordModelCall(requestedAgentId || 'default', 0, Date.now() - startTime);
       logger.error('Chat 错误:', err.message);
       throw err;
     }
@@ -653,6 +737,7 @@ export function createGateway(config, deps) {
         logger.info(`API 端点:`);
         logger.info(`  GET  /health       - 健康检查`);
         logger.info(`  GET  /stats        - 统计信息`);
+        logger.info(`  GET  /metrics      - Prometheus 指标`);
         logger.info(`  GET  /agents       - Agent 列表`);
         logger.info(`  GET  /agents/:id   - Agent 详情`);
         logger.info(`  GET  /sessions     - 会话列表`);

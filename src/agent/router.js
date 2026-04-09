@@ -4,9 +4,64 @@
  */
 
 import { createLogger } from '../utils/logger.js';
+import { ConfigError } from '../utils/errors.js';
 import OpenAI from 'openai';
 
 const logger = createLogger('agent-router');
+
+// 路由结果缓存
+const routerCache = new Map();
+const ROUTER_CACHE_TTL = 5 * 60 * 1000; // 5分钟
+const ROUTER_CACHE_MAX_SIZE = 1000; // 最大缓存条目数
+
+/**
+ * 计算消息的缓存键（对相似消息归一化）
+ */
+function getCacheKey(message) {
+  // 提取前50个字符作为缓存键，过滤标点并小写化
+  const normalized = message
+    .slice(0, 50)
+    .toLowerCase()
+    .replace(/[^\u4e00-\u9fa5a-z0-9]/g, ''); // 只保留中文、字母、数字
+  return normalized;
+}
+
+/**
+ * 清理过期缓存
+ */
+function pruneRouterCache() {
+  const now = Date.now();
+  for (const [key, entry] of routerCache.entries()) {
+    if (now - entry.timestamp > ROUTER_CACHE_TTL) {
+      routerCache.delete(key);
+    }
+  }
+}
+
+/**
+ * 获取缓存的路由结果
+ */
+function getCachedRoute(cacheKey) {
+  pruneRouterCache();
+  const entry = routerCache.get(cacheKey);
+  if (entry && Date.now() - entry.timestamp < ROUTER_CACHE_TTL) {
+    logger.debug(`路由缓存命中: ${cacheKey.substring(0, 20)}... -> ${entry.agentId}`);
+    return entry.agentId;
+  }
+  return null;
+}
+
+/**
+ * 设置路由缓存
+ */
+function setCachedRoute(cacheKey, agentId) {
+  // LRU 清理
+  if (routerCache.size >= ROUTER_CACHE_MAX_SIZE) {
+    const oldestKey = routerCache.keys().next().value;
+    routerCache.delete(oldestKey);
+  }
+  routerCache.set(cacheKey, { agentId, timestamp: Date.now() });
+}
 
 /**
  * 创建路由器
@@ -111,11 +166,19 @@ export function createRouter(config = {}) {
    * @returns {Promise<string>} 选中的 Agent ID
    */
   async function routeByLLM(message, agents) {
+    // 先检查缓存
+    const cacheKey = getCacheKey(message);
+    const cached = getCachedRoute(cacheKey);
+    if (cached && agents.has(cached)) {
+      logger.debug(`LLM 路由缓存命中: ${message.substring(0, 30)}...`);
+      return cached;
+    }
+
     if (!llmClient) {
       logger.warn('LLM 客户端未初始化，回退到模式匹配');
       return routeByPattern(message, agents);
     }
-    
+
     // 构建路由提示
     const agentList = Array.from(agents.values()).map(agent => {
       const meta = registeredAgents.get(agent.metadata.id);
@@ -126,12 +189,12 @@ export function createRouter(config = {}) {
         skills: meta?.skills || [],
       };
     });
-    
+
     const prompt = buildRouterPrompt(message, agentList);
-    
+
     try {
       const startTime = Date.now();
-      
+
       const response = await llmClient.chat.completions.create({
         model: llmConfig.model || process.env.MODEL_NAME || 'gpt-3.5-turbo',
         messages: [
@@ -141,15 +204,18 @@ export function createRouter(config = {}) {
         temperature: llmConfig.temperature ?? 0,
         max_tokens: llmConfig.max_tokens || 50,
       });
-      
+
       const result = response.choices[0].message.content.trim();
       const duration = Date.now() - startTime;
-      
+
       // 解析结果
       const selectedId = parseLLMResponse(result, agents);
-      
+
+      // 缓存结果
+      setCachedRoute(cacheKey, selectedId);
+
       logger.info(`LLM 路由: ${message.substring(0, 50)}... -> ${selectedId} (${duration}ms)`);
-      
+
       return selectedId;
     } catch (err) {
       logger.error('LLM 路由失败:', err.message);
@@ -223,23 +289,37 @@ Agent ID:`;
    * 混合路由策略
    * 1. 先尝试关键词匹配（高置信度）
    * 2. 如果不确定，使用 LLM 判断
+   * 3. 对 LLM 结果进行缓存
    */
   async function routeHybrid(message, agents) {
+    // 先检查缓存
+    const cacheKey = getCacheKey(message);
+    const cached = getCachedRoute(cacheKey);
+    if (cached && agents.has(cached)) {
+      logger.debug(`混合路由缓存命中: ${message.substring(0, 30)}...`);
+      return cached;
+    }
+
     // 先进行模式匹配
     const patternResult = routeByPattern(message, agents);
-    
+
     // 如果匹配到了高优先级 Agent，直接使用
     const matchedAgent = registeredAgents.get(patternResult);
     if (matchedAgent && matchedAgent.priority >= 8) {
       logger.debug(`混合路由: 高优先级匹配 ${patternResult}`);
+      setCachedRoute(cacheKey, patternResult);
       return patternResult;
     }
-    
+
     // 如果消息较短或没有匹配，使用 LLM
     if (message.length < 20 || patternResult === defaultAgentId) {
-      return await routeByLLM(message, agents);
+      const llmResult = await routeByLLM(message, agents);
+      setCachedRoute(cacheKey, llmResult);
+      return llmResult;
     }
-    
+
+    // 缓存模式匹配结果
+    setCachedRoute(cacheKey, patternResult);
     return patternResult;
   }
   

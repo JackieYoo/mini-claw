@@ -13,6 +13,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { parse } from 'yaml';
 import { createLogger } from './logger.js';
+import { maskSensitiveData } from './mask.js';
 
 const logger = createLogger('config');
 
@@ -303,23 +304,5 @@ export async function loadAgentsConfig() {
  * 创建配置快照（脱敏）
  */
 export function createConfigSnapshot(config) {
-  const snapshot = JSON.parse(JSON.stringify(config));
-  
-  // 脱敏敏感信息
-  const sensitiveKeys = ['api_key', 'app_secret', 'secret', 'password', 'token'];
-  
-  const maskSensitive = (obj) => {
-    if (typeof obj !== 'object' || obj === null) return;
-    
-    for (const key of Object.keys(obj)) {
-      if (sensitiveKeys.some(sk => key.toLowerCase().includes(sk))) {
-        obj[key] = '***';
-      } else if (typeof obj[key] === 'object') {
-        maskSensitive(obj[key]);
-      }
-    }
-  };
-  
-  maskSensitive(snapshot);
-  return snapshot;
+  return maskSensitiveData(config);
 }
