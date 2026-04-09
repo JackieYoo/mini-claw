@@ -430,21 +430,36 @@ Agent ID:`;
  */
 export function extractAgentMention(message) {
   if (!message) return { text: '', agentId: null };
-  
+
   // 匹配 @agent-id 或 @agent_name 格式
   const mentionRegex = /@([a-zA-Z0-9_-]+)/g;
   const matches = message.match(mentionRegex);
-  
+
   if (!matches || matches.length === 0) {
     return { text: message, agentId: null };
   }
-  
-  // 取第一个 @mention
-  const agentId = matches[0].substring(1);
-  
-  // 移除所有 @mention
-  const cleanedText = message.replace(mentionRegex, '').trim();
-  
+
+  // 过滤掉飞书内部 mention 格式（@_user_1, @_user_2 等）
+  const agentMentions = matches.filter(m => {
+    const id = m.substring(1);
+    return !id.match(/^_user_\d+$/);  // 跳过 @_user_N
+  });
+
+  if (agentMentions.length === 0) {
+    // 全部是飞书 mention，不移除
+    return { text: message, agentId: null };
+  }
+
+  // 取第一个有效的 @agent mention
+  const agentId = agentMentions[0].substring(1);
+
+  // 只移除 agent mention，保留飞书 @_user_N
+  let cleanedText = message;
+  for (const mention of agentMentions) {
+    cleanedText = cleanedText.replace(mention, '');
+  }
+  cleanedText = cleanedText.replace(/\s+/g, ' ').trim();
+
   return { text: cleanedText, agentId };
 }
 

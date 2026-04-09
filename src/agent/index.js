@@ -214,9 +214,25 @@ export function createAgent(config, toolRegistry) {
       const startTime = Date.now();
 
       // 使用重试机制调用 API
-      let response = await retryApi(() => client.chat.completions.create(requestParams), {
-        maxRetries: 3,
-        initialDelay: 2000,
+      // glm-5.1 等推理模型需要更大 max_tokens，推理 token 包含在内
+      const isReasoningModel = config.model?.includes('glm-5') ||
+                               config.model?.includes('o1') ||
+                               config.model?.includes('o3') ||
+                               config.model?.includes('deepseek-r1');
+      const effectiveMaxTokens = isReasoningModel
+        ? Math.max(config.max_tokens || 4096, 8192)
+        : (config.max_tokens || 4096);
+
+      // 推理模型不支持自定义 temperature
+      const effectiveTemperature = isReasoningModel ? undefined : (config.temperature || 0.7);
+
+      let response = await retryApi(() => client.chat.completions.create({
+        ...requestParams,
+        max_tokens: effectiveMaxTokens,
+        ...(effectiveTemperature !== undefined && { temperature: effectiveTemperature }),
+      }), {
+        maxRetries: 2,
+        initialDelay: 1000,
       });
       let assistantMessage = response.choices[0].message;
       
@@ -285,9 +301,11 @@ export function createAgent(config, toolRegistry) {
         response = await retryApi(() => client.chat.completions.create({
           ...requestParams,
           messages: updatedValidation.messages,
+          max_tokens: effectiveMaxTokens,
+          ...(effectiveTemperature !== undefined && { temperature: effectiveTemperature }),
         }), {
-          maxRetries: 3,
-          initialDelay: 2000,
+          maxRetries: 2,
+          initialDelay: 1000,
         });
         
         assistantMessage = response.choices[0].message;

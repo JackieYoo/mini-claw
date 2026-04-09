@@ -218,18 +218,10 @@ export function createFeishuChannel(config) {
   }
   
   async function fetchBotInfo() {
-    try {
-      const client = getLarkClient();
-      
-      const result = await client.bot.userInfo.get();
-      if (result.code === 0 && result.data?.bot) {
-        botOpenId = result.data.bot.open_id;
-        logger.info(`🤖 机器人: ${result.data.bot.app_name} (${botOpenId})`);
-        logger.info(`😊 表情回复: ${reactionConfig.enabled ? '已启用' : '已禁用'}`);
-      }
-    } catch (err) {
-      logger.warn('获取机器人信息失败:', err.message);
-    }
+    // SDK 1.59.0+ 中 client.bot API 已被移除，跳过此步骤
+    // WebSocket 连接不需要预先获取 bot 信息
+    logger.debug('跳过获取机器人信息（SDK 版本不支持）');
+    return;
   }
   
   // 健康检查配置
@@ -323,8 +315,8 @@ export function createFeishuChannel(config) {
         appId: app_id,
         appSecret: app_secret,
         domain: resolveDomain(domain),
-        // 关闭 SDK 内部日志（避免 system busy 刷屏），用 error 级别替代
-        loggerLevel: Lark.LoggerLevel.error,
+        // SDK 1.59.0+ 使用字符串格式
+        loggerLevel: 'error',
       });
 
       eventDispatcher = new Lark.EventDispatcher({});
@@ -379,20 +371,35 @@ export function createFeishuChannel(config) {
       return true;
 
     } catch (err) {
-      logger.error('连接飞书长连接失败:', err.message);
+      logger.error('连接飞书长连接失败:', err.message || err);
 
-      // 根据错误类型提供具体建议
-      if (err.message?.includes('app_id') || err.message?.includes('app_secret')) {
+      // 详细错误诊断
+      const errorCode = err.code || err.status;
+      if (errorCode === 401 || errorCode === 'invalid_token' || errorCode === '99991663') {
+        logger.error('🔑 飞书授权失败，请检查:');
+        logger.error('   1. FEISHU_APP_ID 和 FEISHU_APP_SECRET 是否正确');
+        logger.error('   2. 应用是否已发布到企业（在"版本管理与发布"中查看）');
+        logger.error('   3. 应用是否有以下权限:');
+        logger.error('      - bot:bot:read (获取机器人信息)');
+        logger.error('      - im:message:send (发送消息)');
+        logger.error('      - im:message.receive_v1 (接收消息)');
+        logger.error('   4. 如果是自建应用，确认已启用"机器人"能力');
+      } else if (errorCode === 403) {
+        logger.error('🚫 飞书权限不足，请在应用后台添加必要权限');
+      } else if (err.message?.includes('app_id') || err.message?.includes('app_secret')) {
         logger.error('💡 请检查 .env 文件中的 FEISHU_APP_ID 和 FEISHU_APP_SECRET');
-      } else if (err.message?.includes('timeout') || err.message?.includes('ETIMEDOUT')) {
-        logger.error('💡 网络连接超时，请检查网络连接');
+      } else if (err.message?.includes('timeout') || err.message?.includes('ETIMEDOUT') || err.code === 'ECONNREFUSED') {
+        logger.error('🌐 网络连接问题:');
+        logger.error('   1. 检查网络连接');
+        logger.error('   2. 如果使用代理，设置 HTTP_PROXY/HTTPS_PROXY');
+        logger.error('   3. 检查是否可访问飞书服务器');
       }
 
       // 尝试重连
       if (reconnectAttempts < maxReconnectAttempts) {
         await reconnect(factory);
       } else {
-        logger.error('飞书连接失败，Gateway 将继续运行但飞书功能不可用');
+        logger.error('❌ 飞书连接失败，Gateway 将继续运行但飞书功能不可用');
       }
 
       return false;
@@ -481,6 +488,18 @@ export function createFeishuChannel(config) {
     // 解析 @agent 提及（传递给 agentFactory 做显式指定）
     const { text: cleanedContent, agentId: mentionedAgentId } = extractAgentMention(content);
 
+    // 如果只有 @agent 没有其他内容，绑定 Agent 并发送确认
+    if (!cleanedContent && mentionedAgentId) {
+      const agent = agentFactory?.get?.(mentionedAgentId);
+      if (agent) {
+        agentFactory.bindSession(sessionKey, mentionedAgentId);
+        await sendMessage(chatId, 'chat_id', `✅ 已切换到 ${agent.metadata.name}，后续消息将由此 Agent 处理\n发送 /agents 查看所有 Agent`);
+      } else {
+        await sendMessage(chatId, 'chat_id', `❌ Agent "${mentionedAgentId}" 不存在，使用 /agents 查看列表`);
+      }
+      return;
+    }
+
     if (cleanedContent && agentFactory) {
       try {
         if (reactionConfig.enabled && reactionConfig.showProcessing) {
@@ -532,7 +551,16 @@ export function createFeishuChannel(config) {
 
       } catch (err) {
         logger.error('Agent 处理错误:', err.message);
-        await sendMessage(chatId, 'chat_id', `❌ ${err.message}`);
+
+        // 根据错误类型给用户友好的提示
+        let userMessage = err.message;
+        if (err.message?.includes('Connection error') || err.message?.includes('ECONNREFUSED') || err.message?.includes('timeout')) {
+          userMessage = 'AI 模型服务暂时不可用，请稍后重试\n💡 检查 MODEL_API_BASE 是否可访问';
+        } else if (err.message?.includes('401') || err.message?.includes('API Key')) {
+          userMessage = 'API Key 配置错误，请联系管理员';
+        }
+
+        await sendMessage(chatId, 'chat_id', `❌ ${userMessage}`);
 
         if (reactionConfig.enabled && reactionConfig.showResult) {
           await reactionManager.add(messageId, reactionConfig.errorEmoji);

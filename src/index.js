@@ -228,14 +228,23 @@ async function main() {
     process.exit(0);
   };
   
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  
-  // 未捕获异常处理
+  // 防止重复注册监听器（热重载场景）
+  process.setMaxListeners(20);
+
+  // 去重注册：先移除再添加
+  const signals = ['SIGINT', 'SIGTERM'];
+  for (const sig of signals) {
+    process.removeAllListeners(sig);
+    process.on(sig, () => shutdown(sig));
+  }
+
+  // 未捕获异常处理（同样去重）
+  process.removeAllListeners('uncaughtException');
   process.on('uncaughtException', (err) => {
     logger.error('未捕获异常:', err);
   });
-  
+
+  process.removeAllListeners('unhandledRejection');
   process.on('unhandledRejection', (reason, promise) => {
     logger.error('未处理的 Promise 拒绝:', reason);
   });
